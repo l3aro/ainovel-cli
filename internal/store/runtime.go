@@ -50,7 +50,12 @@ func (s *RuntimeStore) AppendQueue(item domain.RuntimeQueueItem) (domain.Runtime
 }
 
 // LoadQueue đọc toàn bộ các mục trong hàng đợi runtime đã được lưu trữ.
+// Flush phòng thủ trước khi đọc: queue ghi fsync (không bộ nhớ đệm) nên không
+// bắt buộc, nhưng giữ để mọi writer bộ nhớ đệm trên IO này (task log) đã xuống đĩa.
 func (s *RuntimeStore) LoadQueue() ([]domain.RuntimeQueueItem, error) {
+	if err := s.io.FlushBuffered(); err != nil {
+		return nil, err
+	}
 	return loadJSONLines[domain.RuntimeQueueItem](s.io, runtimeQueuePath)
 }
 
@@ -70,6 +75,7 @@ func (s *RuntimeStore) LoadQueueAfter(afterSeq int64) ([]domain.RuntimeQueueItem
 }
 
 // AppendTaskLog thêm một mục log vào nhật ký chạy của một task cụ thể.
+// Ghi bộ nhớ đệm (log quan sát — xem appendJSONLineBuffered).
 func (s *RuntimeStore) AppendTaskLog(taskID string, entry domain.RuntimeTaskLogEntry) error {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
@@ -81,14 +87,18 @@ func (s *RuntimeStore) AppendTaskLog(taskID string, entry domain.RuntimeTaskLogE
 	if entry.TaskID == "" {
 		entry.TaskID = taskID
 	}
-	return s.appendJSONLine(taskLogPath(taskID), entry)
+	return s.appendJSONLineBuffered(taskLogPath(taskID), entry)
 }
 
 // LoadTaskLog đọc toàn bộ nhật ký chạy của một task cụ thể.
+// Flush bộ nhớ đệm trước khi đọc để thấy các mục vừa ghi qua AppendLineBuffered.
 func (s *RuntimeStore) LoadTaskLog(taskID string) ([]domain.RuntimeTaskLogEntry, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
 		return nil, nil
+	}
+	if err := s.io.FlushBuffered(); err != nil {
+		return nil, err
 	}
 	return loadJSONLines[domain.RuntimeTaskLogEntry](s.io, taskLogPath(taskID))
 }
@@ -112,6 +122,10 @@ func (s *RuntimeStore) Reset() error {
 	if err := os.RemoveAll(filepath.Join(s.io.dir, "meta", "runtime", "tasks")); err != nil {
 		errs = append(errs, err.Error())
 	}
+	// Bỏ writer bộ nhớ đệm của các đường dẫn vừa xóa: nếu giữ lại, lần ghi sau sẽ
+	// tiếp tục vào inode đã bị unlink và file mới không bao giờ được tạo trên đĩa.
+	s.io.DropBuffered(runtimeQueuePath)
+	s.io.DropBufferedPrefix("meta/runtime/tasks")
 	if err := os.MkdirAll(filepath.Join(s.io.dir, "meta", "runtime", "tasks"), 0o755); err != nil {
 		errs = append(errs, err.Error())
 	}
@@ -126,6 +140,12 @@ func (s *RuntimeStore) ensureSeqLoadedLocked() error {
 	if s.seqLoaded {
 		return nil
 	}
+	// Flush phòng thủ trước khi đọc: queue ghi fsync (không bộ nhớ đệm) nên không
+	// bắt buộc, nhưng giữ để bảo đảm mọi writer bộ nhớ đệm trên IO này (task log)
+	// đã xuống đĩa — đọc cùng tiến trình phải thấy dữ liệu vừa ghi.
+	if err := s.io.FlushBuffered(); err != nil {
+		return err
+	}
 	items, err := loadJSONLines[domain.RuntimeQueueItem](s.io, runtimeQueuePath)
 	if err != nil {
 		return err
@@ -137,6 +157,10 @@ func (s *RuntimeStore) ensureSeqLoadedLocked() error {
 	return nil
 }
 
+// appendJSONLine ghi nối tiếp một mục vào queue runtime với fsync mỗi dòng.
+// queue.jsonl là dữ liệu khôi phục: ReplayQueue / ensureSeqLoadedLocked / LoadQueueAfter
+// dùng nó để tái lập trạng thái runtime và dãy số thứ tự, nên mất đuôi khi crash có thể
+// làm lệch trạng thái hồi phục và trùng seq — KHÔNG dùng đường bộ nhớ đệm.
 func (s *RuntimeStore) appendJSONLine(rel string, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -144,6 +168,18 @@ func (s *RuntimeStore) appendJSONLine(rel string, value any) error {
 	}
 	data = append(data, '\n')
 	return s.io.AppendLine(rel, data)
+}
+
+// appendJSONLineBuffered ghi nối tiếp một mục log task qua đường bộ nhớ đệm.
+// Task log chỉ là log quan sát; đuôi log khi crash được bỏ qua như đã chấp nhận,
+// độ bền lúc thoát bình thường do FlushLogs bảo đảm.
+func (s *RuntimeStore) appendJSONLineBuffered(rel string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return s.io.AppendLineBuffered(rel, data)
 }
 
 func loadJSONLines[T any](io *IO, rel string) ([]T, error) {

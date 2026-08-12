@@ -36,6 +36,7 @@ func TestSessionStore_MetaInjected_AssistantWithUsage(t *testing.T) {
 		Usage: nil, // assistant nhưng không có usage (streaming chưa gửi final usage chunk)
 	})
 
+	s.io.FlushBuffered() // ghi nối tiếp bộ nhớ đệm: phải flush mới đọc được từ đĩa
 	entries := readJSONL(t, filepath.Join(dir, "meta/sessions/agents/writer-ch01.jsonl"))
 	if len(entries) != 3 {
 		t.Fatalf("entries=%d want 3", len(entries))
@@ -72,6 +73,7 @@ func TestSessionStore_MetaModelSwitch(t *testing.T) {
 	current = "model-b" // mô phỏng /model switch
 	logger("writer", "viết chương 1", makeAssistantWithUsage())
 
+	s.io.FlushBuffered() // ghi nối tiếp bộ nhớ đệm: phải flush mới đọc được từ đĩa
 	entries := readJSONL(t, filepath.Join(dir, "meta/sessions/agents/writer-ch01.jsonl"))
 	if len(entries) != 2 {
 		t.Fatalf("entries=%d want 2", len(entries))
@@ -96,6 +98,7 @@ func TestSessionStore_NilLookup(t *testing.T) {
 	logger := s.CoordinatorLogger(nil)
 	logger(makeAssistantWithUsage())
 
+	s.io.FlushBuffered() // ghi nối tiếp bộ nhớ đệm: phải flush mới đọc được từ đĩa
 	entries := readJSONL(t, filepath.Join(dir, "meta/sessions/coordinator.jsonl"))
 	if len(entries) != 1 {
 		t.Fatalf("entries=%d want 1", len(entries))

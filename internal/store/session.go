@@ -121,7 +121,10 @@ func (s *SessionStore) logEntry(rel string, msg agentcore.AgentMessage, meta *se
 		return fmt.Errorf("marshal session message: %w", err)
 	}
 	data = append(data, '\n')
-	return s.io.AppendLine(rel, data)
+	// Ghi bộ nhớ đệm (flush lười theo kích thước/200ms, không fsync mỗi dòng):
+	// session log là log quan sát, không phải cơ chế phục hồi; độ bền đuôi log
+	// do FlushLogs ở đường thoát chuẩn bảo đảm.
+	return s.io.AppendLineBuffered(rel, data)
 }
 
 func usageMeta(usage *agentcore.Usage) *sessionLogMeta {

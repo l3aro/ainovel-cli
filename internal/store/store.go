@@ -30,13 +30,17 @@ type Store struct {
 	StyleStats  *StyleStatsStore
 
 	crossMu sync.Mutex // bảo vệ các thao tác nguyên tử liên miền
+
+	// ios là tập hợp các instance IO của mọi store con (có thể lặp: Outline và
+	// Checkpoints dùng chung một instance), để FlushLogs đẩy toàn bộ log bộ nhớ đệm.
+	ios []*IO
 }
 
 // NewStore tạo bộ quản lý trạng thái, dir là thư mục gốc đầu ra của tiểu thuyết.
 func NewStore(dir string) *Store {
 	io := newIO(dir)
 	outline := NewOutlineStore(io)
-	return &Store{
+	s := &Store{
 		dir:         dir,
 		Progress:    NewProgressStore(newIO(dir)),
 		Outline:     outline,
@@ -55,6 +59,27 @@ func NewStore(dir string) *Store {
 		Simulation:  NewSimulationStore(newIO(dir)),
 		StyleStats:  NewStyleStatsStore(newIO(dir)),
 	}
+	s.ios = []*IO{
+		io,
+		s.Progress.io, s.Outline.io, s.Drafts.io, s.Summaries.io, s.RunMeta.io,
+		s.Directives.io, s.Signals.io, s.Runtime.io, s.Characters.io, s.Cast.io,
+		s.World.io, s.Checkpoints.io, s.Sessions.io, s.Usage.io, s.Simulation.io,
+		s.StyleStats.io,
+	}
+	return s
+}
+
+// FlushLogs đẩy toàn bộ dữ liệu ghi nối tiếp bộ nhớ đệm của mọi store con xuống
+// kernel (chỉ buf.Flush, không fsync — log quan sát). Gọi ở các đường thoát chuẩn
+// (Host.Close, headless Run) để log đầy đủ khi thoát bình thường.
+func (s *Store) FlushLogs() error {
+	var firstErr error
+	for _, io := range s.ios {
+		if err := io.FlushBuffered(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // Dir trả về thư mục gốc đầu ra.

@@ -391,6 +391,11 @@ func (h *Host) Close() {
 	if err := h.usage.SaveNow(); err != nil {
 		slog.Warn("Lưu usage trước khi thoát thất bại", "module", "usage", "err", err)
 	}
+	// Đẩy log ghi nối tiếp bộ nhớ đệm (session/runtime) xuống kernel trước khi thoát,
+	// để đuôi log không bị bỏ lại trong bộ đệm tiến trình khi tiến trình kết thúc.
+	if err := h.FlushLogs(); err != nil {
+		slog.Warn("Flush log bộ nhớ đệm trước khi thoát thất bại", "module", "io", "err", err)
+	}
 	h.closeOnce.Do(func() {
 		close(h.done)
 		close(h.events)
@@ -474,6 +479,15 @@ func (h *Host) Stream() <-chan string       { return h.streamCh }
 func (h *Host) Done() <-chan struct{}       { return h.done }
 func (h *Host) Dir() string                 { return h.store.Dir() }
 func (h *Host) AskUser() *tools.AskUserTool { return h.askUser }
+
+// FlushLogs đẩy toàn bộ log ghi nối tiếp bộ nhớ đệm (session/runtime) xuống kernel.
+// Đường thoát của headless gọi trước khi xuất chẩn đoán để bản chẩn đoán thấy đủ dữ liệu.
+func (h *Host) FlushLogs() error {
+	if h.store == nil {
+		return nil
+	}
+	return h.store.FlushLogs()
+}
 
 // ── Phát sự kiện ──
 

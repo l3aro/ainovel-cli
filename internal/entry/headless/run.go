@@ -51,6 +51,9 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 	// Khi chạy xong hoặc trả về lỗi, xuất một bản chẩn đoán đã ẩn danh hóa để người dùng headless dễ báo issue.
 	// (Các trường hợp bị kill từ bên ngoài không đi qua defer, vẫn cần dùng /diag thủ công trong TUI.)
 	defer func() { _, _ = diag.Export(store.NewStore(eng.Dir())) }()
+	// Flush log bộ nhớ đệm TRƯỚC bản chẩn đoán (defer chạy LIFO) để bản chẩn đoán thấy đủ
+	// session/runtime log; bản thân eng.Close cũng flush nên thứ tự này chỉ thắt chặt thêm.
+	defer eng.FlushLogs()
 
 	prompt := strings.TrimSpace(opts.Prompt)
 	if prompt != "" {
