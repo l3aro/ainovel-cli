@@ -75,14 +75,14 @@ type Model struct {
 	streamVP       viewport.Model   // viewport output stream
 	detailVP       viewport.Model   // viewport chi tiết bên phải
 	stateVP        viewport.Model   // viewport thanh trạng thái bên trái (có thể cuộn)
-	streamBuf      *strings.Builder // bộ đệm tích lũy văn bản stream
-	streamRounds   []string
+	streamBuf      *strings.Builder // bộ đệm tích lũy văn bản của round stream đang mở
+	streamRounds   []string         // các round stream đã đóng (đã materialize), round đang mở nằm trong streamBuf
 	textarea       textarea.Model
 	width          int
 	height         int
 	autoScroll     bool
 	streamScroll   bool      // tự động theo dõi bảng stream
-	streamDirty    bool      // streamRounds có delta chưa được làm mới; được gộp 60fps bởi streamFlushTick
+	streamDirty    bool      // streamBuf có delta chưa được làm mới; được gộp 60fps bởi streamFlushTick
 	lastKeyAt      time.Time // thời điểm nhấn phím không phải Enter gần nhất; throttle KeyEnter tránh \n paste kích hoạt submit
 	inputHistory   []string  // lịch sử input đã submit (loại trùng: không lặp liền kề)
 	historyIdx     int       // chỉ số duyệt hiện tại; == len(inputHistory) nghĩa là "chưa duyệt, đang chỉnh sửa bản nháp"
@@ -253,7 +253,7 @@ func (m *Model) refreshStreamViewport() {
 	if m.snapshot.IsRunning {
 		cursor = renderStreamCursor(m.cursorIdx)
 	}
-	m.streamVP.SetContent(renderStreamContent(m.streamRounds, m.streamVP.Width, cursor))
+	m.streamVP.SetContent(renderStreamContent(m.streamRoundsForRender(), m.streamVP.Width, cursor))
 }
 
 func (m *Model) refreshDetailViewport() {

@@ -569,18 +569,19 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return m, tickToolSpinner(), true
 	case cursorTickMsg:
 		m.cursorIdx++
-		if m.snapshot.IsRunning {
-			// Nhấp nháy con trỏ cần render lại toàn bộ panel luồng (con trỏ nằm ở cuối content);
-			// tiện thể xóa luôn dirty, flush tick ngay sau không cần lặp lại.
+		// Chỉ render lại panel luồng khi có delta thật sự: streamFlushTick (60fps) đã lo việc
+		// làm mới theo dirty, tick 120ms này không được render toàn bộ content vô ích mỗi lần.
+		// Chỉ xóa dirty khi đã thực sự render, nếu không sẽ phá gộp 16ms của flush tick.
+		if m.streamDirty {
 			m.refreshStreamViewport()
 			m.streamDirty = false
 		}
 		return m, tickCursor(), true
 	case streamDeltaMsg:
-		if len(m.streamRounds) == 0 {
-			m.streamRounds = append(m.streamRounds, "")
-		}
-		m.streamRounds[len(m.streamRounds)-1] += string(msg)
+		// Tích lũy vào streamBuf thay vì nối chuỗi bất biến (rounds[last] += token):
+		// nối từng token là O(n²) copy cho round lớn. Round đang mở chỉ được materialize
+		// thành string khi render (streamRoundsForRender) hoặc khi đóng round (closeStreamRound).
+		m.streamBuf.WriteString(string(msg))
 		// Không refreshStreamViewport ngay lập tức, để streamFlushTick gộp làm mới ở 60fps.
 		// Khi LLM stream tốc độ cao mỗi giây hàng chục token, làm mới từng cái là mỗi giây hàng chục lần render lại toàn bộ 32 đoạn.
 		m.streamDirty = true
@@ -590,11 +591,7 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		if m.flushStreamIfDirty() && m.streamScroll {
 			m.streamVP.GotoBottom()
 		}
-		if len(m.streamRounds) == 0 {
-			m.streamRounds = append(m.streamRounds, "")
-		} else if strings.TrimSpace(m.streamRounds[len(m.streamRounds)-1]) != "" {
-			m.streamRounds = append(m.streamRounds, "")
-		}
+		m.closeStreamRound()
 		m.trimStreamRounds()
 		m.streamRound = len(m.streamRounds)
 		m.refreshStreamViewport()
@@ -710,13 +707,40 @@ func (m *Model) applyEvent(ev host.Event) {
 	}
 }
 
-// trimStreamRounds cắt bớt streamRounds xuống còn maxStreamRounds đoạn; phần vượt quá bị bỏ từ đầu.
-// Thời điểm gọi: sau mỗi lần streamClear mở vòng mới, và sau khi replay đã nạp xong tất cả mục lịch sử.
+// closeStreamRound đóng round đang mở: materialize nội dung streamBuf thành round đã đóng
+// (khi builder khác rỗng — kể cả chỉ khoảng trắng, giữ nguyên byte như slot cũ), rồi reset builder cho round mới.
+// Chỉ bỏ qua việc ghi sổ "round rỗng ảo" của logic cũ; round rỗng không render gì nên không cần giữ.
+func (m *Model) closeStreamRound() {
+	if m.streamBuf.Len() > 0 {
+		// String() trả về view không copy trên vùng nhớ của builder; Reset() và các delta sau
+		// ghi đè vùng nhớ đó, nên phải clone trước khi lưu vào rounds.
+		m.streamRounds = append(m.streamRounds, strings.Clone(m.streamBuf.String()))
+	}
+	m.streamBuf.Reset()
+}
+
+// streamRoundsForRender trả về danh sách round cho render: các round đã đóng + round đang mở (streamBuf).
+// trimStreamRounds giữ ≤ maxStreamRounds-1 round đóng nên tổng luôn ≤ maxStreamRounds, đúng cap cũ.
+// Kết quả là slice riêng: render không được ghi đè lên vùng nhớ của streamRounds.
+func (m *Model) streamRoundsForRender() []string {
+	if m.streamBuf.Len() == 0 {
+		return m.streamRounds
+	}
+	out := make([]string, len(m.streamRounds), len(m.streamRounds)+1)
+	copy(out, m.streamRounds)
+	return append(out, m.streamBuf.String())
+}
+
+// trimStreamRounds cắt bớt streamRounds (các round đã đóng) xuống còn maxStreamRounds-1 đoạn,
+// dành sẵn 1 slot cho round đang mở trong streamBuf: tổng số round hiển thị ≤ maxStreamRounds,
+// khớp cap cũ (logic cũ giữ ≤ maxStreamRounds slot gồm cả round active, nên cũng chỉ giữ ≤ maxStreamRounds-1
+// round đóng có nội dung ở trạng thái ổn định). Thời điểm gọi: sau mỗi lần streamClear mở vòng mới,
+// và sau khi replay đã nạp xong tất cả mục lịch sử.
 func (m *Model) trimStreamRounds() {
-	if len(m.streamRounds) <= maxStreamRounds {
+	if len(m.streamRounds) <= maxStreamRounds-1 {
 		return
 	}
-	drop := len(m.streamRounds) - maxStreamRounds
+	drop := len(m.streamRounds) - (maxStreamRounds - 1)
 	m.streamRounds = m.streamRounds[drop:]
 }
 
@@ -750,20 +774,13 @@ func (m *Model) applyRuntimeReplay(items []domain.RuntimeQueueItem) {
 			// các dòng ra sẽ thiếu sót. Thà để panel trống còn hơn có dữ liệu nửa vời.
 			continue
 		case domain.RuntimeQueueStreamClear:
-			if len(m.streamRounds) == 0 {
-				m.streamRounds = append(m.streamRounds, "")
-			} else if strings.TrimSpace(m.streamRounds[len(m.streamRounds)-1]) != "" {
-				m.streamRounds = append(m.streamRounds, "")
-			}
+			m.closeStreamRound()
 		case domain.RuntimeQueueStreamDelta:
 			text := host.ReplayDeltaText(item)
 			if text == "" {
 				continue
 			}
-			if len(m.streamRounds) == 0 {
-				m.streamRounds = append(m.streamRounds, "")
-			}
-			m.streamRounds[len(m.streamRounds)-1] += text
+			m.streamBuf.WriteString(text)
 		}
 	}
 	m.trimStreamRounds()
