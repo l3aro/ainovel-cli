@@ -59,18 +59,18 @@ func newArchitectContextEnvelope() architectContextEnvelope {
 
 func (e chapterContextEnvelope) apply(result map[string]any) {
 	// Gộp thay vì ghi đè: luồng chương của Execute sẽ apply hai phong bì liên tiếp (seed + buildChapterContext),
-	// nếu gán toàn bộ thì lần apply thứ hai sẽ xóa nội dung container của seed, các canonical path
-	// như working_memory.* sẽ thành con trỏ trỏ vào không khí, mô hình chỉ còn dựa vào bản sao
-	// ở tầng trên để xử lý mơ hồ.
+	// nếu gán toàn bộ thì lần apply thứ hai sẽ xóa nội dung container của seed.
+	// Container là biểu diễn đơn nhất của ngữ cảnh: mọi giá trị chỉ sống trong working_memory /
+	// episodic_memory / reference_pack / selected_memory, prompt chỉ tham chiếu đường dẫn container
+	// (working_memory.*, reference_pack.*, ...) — không còn bản sao ở tầng trên, tránh gửi trùng
+	// ~2x byte JSON/token tới LLM mỗi lần gọi. trimByBudget tìm key theo danh sách container này
+	// (xem findContextValue); deleteContextKey quét cả tầng trên lẫn container để xoá an toàn.
 	mergeEnvelopeSection(result, "working_memory", e.Working)
 	mergeEnvelopeSection(result, "episodic_memory", e.Episodic)
 	mergeEnvelopeSection(result, "reference_pack", e.References)
 	if len(e.Selected) > 0 {
 		mergeEnvelopeSection(result, "selected_memory", e.Selected)
 	}
-	mergeContextSection(result, e.Working)
-	mergeContextSection(result, e.Episodic)
-	mergeContextSection(result, e.References)
 }
 
 // mergeEnvelopeSection gộp section vào container hiện có của result[key]; nếu container chưa tồn tại thì gán trực tiếp.
@@ -85,18 +85,11 @@ func mergeEnvelopeSection(result map[string]any, key string, section map[string]
 }
 
 func (e architectContextEnvelope) apply(result map[string]any) {
+	// Container là biểu diễn đơn nhất (xem chapterContextEnvelope.apply): mọi giá trị chỉ nằm
+	// trong planning_memory / foundation_memory / reference_pack, không chiếu bản sao lên tầng trên.
 	result["planning_memory"] = e.Planning
 	result["foundation_memory"] = e.Foundation
 	result["reference_pack"] = e.References
-	mergeContextSection(result, e.Planning)
-	mergeContextSection(result, e.Foundation)
-	mergeContextSection(result, e.References)
-}
-
-func mergeContextSection(result map[string]any, section map[string]any) {
-	for key, value := range section {
-		result[key] = value
-	}
 }
 
 // buildProgressStatus chỉ trả về tóm tắt tiến độ khi Điều phối viên gọi (không truyền chapter),

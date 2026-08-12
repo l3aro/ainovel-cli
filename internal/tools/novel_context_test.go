@@ -245,6 +245,7 @@ func TestContextToolChapterModeIncludesWorkingAndReferenceFields(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
+	// Các key thật sự ở tầng trên
 	for _, key := range []string{
 		"premise",
 		"premise_sections",
@@ -252,20 +253,40 @@ func TestContextToolChapterModeIncludesWorkingAndReferenceFields(t *testing.T) {
 		"outline",
 		"world_rules",
 		"memory_policy",
-		"planning_tier",
 		"working_memory",
 		"episodic_memory",
 		"reference_pack",
+	} {
+		if _, ok := payload[key]; !ok {
+			t.Fatalf("expected key %q in chapter context", key)
+		}
+	}
+	// Biểu diễn đơn nhất: dữ liệu ngữ cảnh chỉ sống trong container, không chiếu lên tầng trên.
+	working, ok := payload["working_memory"].(map[string]any)
+	if !ok {
+		t.Fatal("expected working_memory to be a map")
+	}
+	for _, key := range []string{
 		"current_chapter_outline",
 		"recent_summaries",
 		"chapter_plan",
 		"chapter_contract",
 		"previous_tail",
-		"style_rules",
-		"references",
 	} {
-		if _, ok := payload[key]; !ok {
-			t.Fatalf("expected key %q in chapter context", key)
+		if _, ok := working[key]; !ok {
+			t.Fatalf("expected key %q in working_memory", key)
+		}
+	}
+	if _, ok := payload["episodic_memory"].(map[string]any)["planning_tier"]; !ok {
+		t.Fatal("expected planning_tier in episodic_memory")
+	}
+	refPack, ok := payload["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatal("expected reference_pack to be a map")
+	}
+	for _, key := range []string{"style_rules", "references"} {
+		if _, ok := refPack[key]; !ok {
+			t.Fatalf("expected key %q in reference_pack", key)
 		}
 	}
 }
@@ -383,34 +404,62 @@ func TestContextToolArchitectModeIncludesPlanningAndFoundation(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
+	// Các key thật sự ở tầng trên
 	for _, key := range []string{
 		"memory_policy",
-		"planning_tier",
 		"planning_memory",
 		"foundation_memory",
 		"reference_pack",
-		"premise_sections",
-		"premise_structure",
-		"characters",
-		"layered_outline",
-		"skeleton_arcs",
-		"compass",
-		"style_rules",
-		"references",
-		"foundation_status",
 	} {
 		if _, ok := payload[key]; !ok {
 			t.Fatalf("expected key %q in architect context", key)
 		}
 	}
+	// Biểu diễn đơn nhất: dữ liệu ngữ cảnh chỉ sống trong container, không chiếu lên tầng trên.
+	planning, ok := payload["planning_memory"].(map[string]any)
+	if !ok {
+		t.Fatal("expected planning_memory to be a map")
+	}
+	for _, key := range []string{
+		"planning_tier",
+		"layered_outline",
+		"skeleton_arcs",
+		"compass",
+	} {
+		if _, ok := planning[key]; !ok {
+			t.Fatalf("expected key %q in planning_memory", key)
+		}
+	}
+	foundation, ok := payload["foundation_memory"].(map[string]any)
+	if !ok {
+		t.Fatal("expected foundation_memory to be a map")
+	}
+	for _, key := range []string{
+		"premise_sections",
+		"premise_structure",
+		"characters",
+		"foundation_status",
+	} {
+		if _, ok := foundation[key]; !ok {
+			t.Fatalf("expected key %q in foundation_memory", key)
+		}
+	}
+	refPack, ok := payload["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatal("expected reference_pack to be a map")
+	}
+	for _, key := range []string{"style_rules", "references"} {
+		if _, ok := refPack[key]; !ok {
+			t.Fatalf("expected key %q in reference_pack", key)
+		}
+	}
 }
 
-func TestTrimByBudgetRemovesMirroredMemoryKeys(t *testing.T) {
+func TestTrimByBudgetRemovesMemoryKeysFromContainers(t *testing.T) {
+	// Biểu diễn đơn nhất: giá trị chỉ sống trong container (reference_pack / working_memory / ...),
+	// không còn bản sao ở tầng trên. Trim phải tìm được key trong container, xoá khỏi đó
+	// và ghi vào _trimmed.
 	result := map[string]any{
-		"references": map[string]string{
-			"a": strings.Repeat("x", 200),
-			"b": strings.Repeat("y", 200),
-		},
 		"reference_pack": map[string]any{
 			"references": map[string]string{
 				"a": strings.Repeat("x", 200),
@@ -420,17 +469,27 @@ func TestTrimByBudgetRemovesMirroredMemoryKeys(t *testing.T) {
 		},
 	}
 
-	trimByBudget(result, 80)
+	trimByBudget(result, 0)
 
 	if _, ok := result["references"]; ok {
-		t.Fatal("expected top-level references to be trimmed")
+		t.Fatal("expected no top-level references key at all")
 	}
 	pack, ok := result["reference_pack"].(map[string]any)
 	if !ok {
 		t.Fatal("expected reference_pack to remain available")
 	}
 	if _, ok := pack["references"]; ok {
-		t.Fatal("expected mirrored references to be trimmed from reference_pack")
+		t.Fatal("expected references to be trimmed from reference_pack")
+	}
+	if _, ok := pack["style_rules"]; ok {
+		t.Fatal("expected style_rules to be trimmed from reference_pack")
+	}
+	trimmed, ok := result["_trimmed"].([]string)
+	if !ok {
+		t.Fatal("expected _trimmed to be set")
+	}
+	if len(trimmed) != 2 || trimmed[0] != "references" || trimmed[1] != "style_rules" {
+		t.Fatalf("expected _trimmed=[references style_rules], got %v", trimmed)
 	}
 }
 
@@ -443,10 +502,12 @@ func TestTrimByBudgetRespectsBudgetContract(t *testing.T) {
 	bigB := strings.Repeat("y", 5000)
 	payload := func() map[string]any {
 		return map[string]any{
-			"references":    bigA, // chỉ ở top-level
-			"voice_samples": bigB,
+			// Biểu diễn đơn nhất: mỗi key nằm trong đúng một container, không còn bản sao top-level.
+			"reference_pack": map[string]any{
+				"references": bigA,
+			},
 			"working_memory": map[string]any{
-				"voice_samples": bigB, // mirror: bị xoá cùng key top-level
+				"voice_samples": bigB,
 			},
 			"character_arcs": map[string]string{"protagonist": "survives"}, // ngoài trimOrder, phải giữ nguyên
 		}
@@ -460,13 +521,12 @@ func TestTrimByBudgetRespectsBudgetContract(t *testing.T) {
 	}
 
 	onlyA := payload()
-	delete(onlyA, "references")
+	delete(onlyA["reference_pack"].(map[string]any), "references")
 	onlyA["_trimmed"] = []string{"references"}
 	budget := jsonLen(onlyA) - 1 // sát biên: cắt A chưa đủ, phải cắt thêm B
 
 	all := payload()
-	delete(all, "references")
-	delete(all, "voice_samples")
+	delete(all["reference_pack"].(map[string]any), "references")
 	delete(all["working_memory"].(map[string]any), "voice_samples")
 	all["_trimmed"] = []string{"references", "voice_samples"}
 	if jsonLen(all) > budget {
@@ -503,18 +563,25 @@ func TestTrimByBudgetRespectsBudgetContract(t *testing.T) {
 		}
 	}
 
-	// Key đã cắt phải biến mất cả ở top-level lẫn trong container mirror.
+	// Key đã cắt phải biến mất khỏi container chứa nó (và không tồn tại ở top-level).
 	for _, key := range expected {
 		if _, ok := result[key]; ok {
-			t.Fatalf("expected %q to be removed from top level", key)
+			t.Fatalf("expected %q to be absent from top level", key)
 		}
+	}
+	pack, ok := result["reference_pack"].(map[string]any)
+	if !ok {
+		t.Fatal("expected reference_pack to remain available")
+	}
+	if _, ok := pack["references"]; ok {
+		t.Fatal("expected references to be trimmed from reference_pack")
 	}
 	wm, ok := result["working_memory"].(map[string]any)
 	if !ok {
 		t.Fatal("expected working_memory to remain available")
 	}
 	if _, ok := wm["voice_samples"]; ok {
-		t.Fatal("expected mirrored voice_samples to be trimmed from working_memory")
+		t.Fatal("expected voice_samples to be trimmed from working_memory")
 	}
 
 	// Key ngoài trimOrder phải còn nguyên.
@@ -774,8 +841,8 @@ func TestContextToolKeepsFullForeshadowWhenRecallNotTriggered(t *testing.T) {
 	if err := json.Unmarshal(result, &payload); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if _, ok := payload["foreshadow_ledger"]; !ok {
-		t.Fatal("expected full foreshadow ledger to remain when selected recall is not triggered")
+	if _, ok := payload["episodic_memory"].(map[string]any)["foreshadow_ledger"]; !ok {
+		t.Fatal("expected full foreshadow ledger in episodic_memory when selected recall is not triggered")
 	}
 	if _, ok := payload["selected_memory"]; ok {
 		t.Fatalf("expected no selected_memory for small foreshadow sets, got %+v", payload["selected_memory"])
@@ -822,8 +889,8 @@ func TestContextToolFallsBackToFullForeshadowWhenSelectionIsTooSparse(t *testing
 	if err := json.Unmarshal(result, &payload); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if _, ok := payload["foreshadow_ledger"]; !ok {
-		t.Fatal("expected full foreshadow ledger when selection is too sparse")
+	if _, ok := payload["episodic_memory"].(map[string]any)["foreshadow_ledger"]; !ok {
+		t.Fatal("expected full foreshadow ledger in episodic_memory when selection is too sparse")
 	}
 	if selected, ok := payload["selected_memory"].(map[string]any); ok {
 		if _, exists := selected["story_threads"]; exists {
@@ -883,9 +950,13 @@ func TestContextToolInjectsRewriteBriefForPendingRewriteChapter(t *testing.T) {
 	if err := json.Unmarshal(result, &payload); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	brief, ok := payload["rewrite_brief"].(map[string]any)
+	working, ok := payload["working_memory"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected rewrite_brief in chapter context, got %T", payload["rewrite_brief"])
+		t.Fatal("expected working_memory in chapter context")
+	}
+	brief, ok := working["rewrite_brief"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected rewrite_brief in working_memory, got %T", working["rewrite_brief"])
 	}
 	if got := brief["reason"]; got != "节奏拖沓，需要压缩前半段" {
 		t.Fatalf("expected rewrite reason, got %v", got)
@@ -925,8 +996,10 @@ func TestContextToolOmitsRewriteBriefForNormalChapter(t *testing.T) {
 	if err := json.Unmarshal(result, &payload); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if _, ok := payload["rewrite_brief"]; ok {
-		t.Fatal("expected no rewrite_brief for chapter outside PendingRewrites")
+	if working, ok := payload["working_memory"].(map[string]any); ok {
+		if _, ok := working["rewrite_brief"]; ok {
+			t.Fatal("expected no rewrite_brief in working_memory for chapter outside PendingRewrites")
+		}
 	}
 }
 

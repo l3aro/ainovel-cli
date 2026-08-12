@@ -144,25 +144,32 @@ func buildLoadingSummary(result map[string]any, chapter int) string {
 	} else {
 		parts = append(parts, "architect")
 	}
-	if tier, ok := result["planning_tier"].(domain.PlanningTier); ok && tier != "" {
-		parts = append(parts, fmt.Sprintf("tier=%s", tier))
+	if tierVal, ok := findContextValue(result, "planning_tier"); ok {
+		if tier, ok := tierVal.(domain.PlanningTier); ok && tier != "" {
+			parts = append(parts, fmt.Sprintf("tier=%s", tier))
+		}
 	}
 
 	// Vị trí tập-cung
-	if pos, ok := result["position"].(map[string]any); ok {
-		parts = append(parts, fmt.Sprintf("V%dA%d", pos["volume"], pos["arc"]))
+	if posVal, ok := findContextValue(result, "position"); ok {
+		if pos, ok := posVal.(map[string]any); ok {
+			parts = append(parts, fmt.Sprintf("V%dA%d", pos["volume"], pos["arc"]))
+		}
 	}
 
 	var items []string
+	// countSlice đọc theo biểu diễn đơn nhất (container trước, tầng trên sau — xem findContextValue):
+	// dữ liệu ngữ cảnh nằm trong các container, chỉ premise/memory_policy/... là ở tầng trên.
 	countSlice := func(key string) int {
-		if v, ok := result[key]; ok {
-			if s, ok := v.([]domain.Character); ok {
-				return len(s)
-			}
-			// Phản chiếu slice tổng quát
-			return sliceLen(v)
+		v, ok := findContextValue(result, key)
+		if !ok {
+			return 0
 		}
-		return 0
+		if s, ok := v.([]domain.Character); ok {
+			return len(s)
+		}
+		// Phản chiếu slice tổng quát
+		return sliceLen(v)
 	}
 
 	// Nhân vật
@@ -214,14 +221,16 @@ func buildLoadingSummary(result map[string]any, chapter int) string {
 	if n := countSlice("recent_state_changes"); n > 0 {
 		items = append(items, fmt.Sprintf("thay-đổi-trạng-thái:%d", n))
 	}
-	if _, ok := result["previous_tail"]; ok {
+	if _, ok := findContextValue(result, "previous_tail"); ok {
 		items = append(items, "đuôi-chương-trước:ok")
 	}
-	if _, ok := result["style_rules"]; ok {
+	if _, ok := findContextValue(result, "style_rules"); ok {
 		items = append(items, "quy-tắc-phong-cách:ok")
 	}
-	if n := sliceLen(result["related_chapters"]); n > 0 {
-		items = append(items, fmt.Sprintf("chương-liên-quan:%d", n))
+	if rc, ok := findContextValue(result, "related_chapters"); ok {
+		if n := sliceLen(rc); n > 0 {
+			items = append(items, fmt.Sprintf("chương-liên-quan:%d", n))
+		}
 	}
 	if selected, ok := result["selected_memory"].(map[string]any); ok && len(selected) > 0 {
 		if n := sliceLen(selected["story_threads"]); n > 0 {
@@ -232,9 +241,11 @@ func buildLoadingSummary(result map[string]any, chapter int) string {
 		}
 	}
 
-	// Tài liệu tham khảo
-	if refs, ok := result["references"].(map[string]string); ok && len(refs) > 0 {
-		items = append(items, fmt.Sprintf("tham-khảo:%d-mục", len(refs)))
+	// Tài liệu tham khảo (trong reference_pack theo biểu diễn đơn nhất)
+	if refsVal, ok := findContextValue(result, "references"); ok {
+		if refs, ok := refsVal.(map[string]string); ok && len(refs) > 0 {
+			items = append(items, fmt.Sprintf("tham-khảo:%d-mục", len(refs)))
+		}
 	}
 	if pack, ok := result["reference_pack"].(map[string]any); ok && len(pack) > 0 {
 		items = append(items, fmt.Sprintf("gói-tham-khảo:%d", len(pack)))
@@ -471,6 +482,37 @@ func (t *ContextTool) ContextSummary() string {
 	return strings.Join(parts, ", ")
 }
 
+// trimContainerKeys là danh sách container mà findContextValue / deleteContextKey quét để tìm/xoá key
+// theo biểu diễn đơn nhất. PHẢI giữ đồng bộ với các container mà envelope.apply tạo ra:
+// nếu lệch, findContextValue bỏ sót vị trí thật của key (ước lượng tiết kiệm sai -> có thể vượt budget).
+var trimContainerKeys = []string{
+	"working_memory",
+	"episodic_memory",
+	"reference_pack",
+	"planning_memory",
+	"foundation_memory",
+}
+
+// findContextValue định vị giá trị của key theo biểu diễn đơn nhất: kiểm tra result[key]
+// trước (các key thật sự ở tầng trên như premise / memory_policy), rồi lần lượt từng container
+// theo trimContainerKeys. Mỗi key nằm ở đúng một vị trí, nên giá trị tìm được là bản duy nhất
+// tốn byte khi serialize.
+func findContextValue(result map[string]any, key string) (any, bool) {
+	if v, ok := result[key]; ok {
+		return v, true
+	}
+	for _, containerKey := range trimContainerKeys {
+		section, ok := result[containerKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		if v, has := section[key]; has {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
 // trimByBudget cắt bớt result theo độ ưu tiên sao cho tổng kích thước JSON không vượt budget byte.
 // Độ ưu tiên (từ thấp đến cao): references < voice_samples < style_anchors < previous_tail < timeline
 //
@@ -499,17 +541,6 @@ func trimByBudget(result map[string]any, budget int) {
 		"relationship_state",
 	}
 
-	// Các container mà deleteContextKey cũng quét để xoá key trùng bên trong.
-	// PHẢI giữ đồng bộ với danh sách trong deleteContextKey: nếu lệch, copies sẽ sai
-	// và có thể ước lượng quá cao mức tiết kiệm -> vượt budget.
-	containers := []string{
-		"working_memory",
-		"episodic_memory",
-		"planning_memory",
-		"foundation_memory",
-		"reference_pack",
-	}
-
 	var trimmed []string
 	// Chi phí serialize của result["_trimmed"] khi kết thúc: 12 byte cố định
 	// (dấu phẩy + `"_trimmed":`) + `[` + `]` + các key đã cắt (dấu ngoặc kép, dấu phẩy).
@@ -517,29 +548,22 @@ func trimByBudget(result map[string]any, budget int) {
 	// _trimmed cũng nằm trong json.Marshal(result) cuối cùng.
 	trimmedOverhead := 0
 	for _, key := range trimOrder {
-		if _, ok := result[key]; !ok {
+		value, ok := findContextValue(result, key)
+		if !ok {
 			continue
 		}
 		// Marshal phần này đúng một lần để ước lượng mức tiết kiệm.
-		// save = kích thước phần × số vị trí sẽ bị xoá (top-level + các container chứa key).
+		// Giá trị chỉ tồn tại ở đúng một vị trí (trong container, hoặc tầng trên với payload
+		// cũ còn mirror) nên copies = 1; deleteContextKey vẫn quét top-level + mọi container,
+		// nhưng các vị trí khác là no-op nên không tốn thêm byte.
 		// Cố tình KHÔNG tính chi phí tên key/dấu phẩy/dấu ngoặc nên save luôn THẤP HƠN
 		// mức tiết kiệm thực tế -> kích thước cuối không bao giờ vượt budget (tình huống
 		// xấu nhất chỉ xoá dư một key, an toàn; không bao giờ ước lượng quá cao).
-		secData, err := json.Marshal(result[key])
+		secData, err := json.Marshal(value)
 		if err != nil {
 			continue
 		}
-		copies := 1
-		for _, containerKey := range containers {
-			section, ok := result[containerKey].(map[string]any)
-			if !ok {
-				continue
-			}
-			if _, has := section[key]; has {
-				copies++
-			}
-		}
-		save := len(secData) * copies
+		save := len(secData)
 
 		deleteContextKey(result, key)
 		trimmed = append(trimmed, key)
@@ -559,14 +583,10 @@ func trimByBudget(result map[string]any, budget int) {
 }
 
 func deleteContextKey(result map[string]any, key string) {
+	// Xoá ở tầng trên lẫn mọi container: với payload biểu diễn đơn nhất chỉ một vị trí
+	// thật sự chứa key (các vị trí còn lại là no-op), payload cũ còn mirror vẫn được dọn sạch.
 	delete(result, key)
-	for _, containerKey := range []string{
-		"working_memory",
-		"episodic_memory",
-		"planning_memory",
-		"foundation_memory",
-		"reference_pack",
-	} {
+	for _, containerKey := range trimContainerKeys {
 		section, ok := result[containerKey].(map[string]any)
 		if !ok {
 			continue
