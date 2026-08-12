@@ -7,18 +7,22 @@ func SameModelID(a, b string) bool {
 	return modelLookupMatches(normalizeModelLookupID(a), normalizeModelLookupID(b))
 }
 
-func lookupModelEntry(models []ModelEntry, providerName, modelID string) (ModelEntry, bool) {
+// lookupModelEntry tìm mục theo "provider/model" bằng chỉ mục đã tiền xử lý,
+// trả về chỉ số của mục trong r.models. Phải gọi khi đang giữ r.mu (RLock hoặc Lock).
+// providerName rỗng → bỏ qua bộ lọc provider.
+func (r *ModelRegistry) lookupModelEntry(providerName, modelID string) (int, bool) {
 	providerName = strings.ToLower(strings.TrimSpace(providerName))
 	targetID := normalizeModelLookupID(modelID)
-	for _, m := range models {
-		if providerName != "" && !strings.EqualFold(m.Provider, providerName) {
+	for i := range r.idx {
+		e := &r.idx[i]
+		if providerName != "" && !strings.EqualFold(e.lowerProvider, providerName) {
 			continue
 		}
-		if modelLookupMatches(normalizeModelLookupID(m.ID), targetID) {
-			return m, true
+		if modelLookupMatches(e.normID, targetID) {
+			return i, true
 		}
 	}
-	return ModelEntry{}, false
+	return -1, false
 }
 
 func normalizeModelLookupID(modelID string) string {

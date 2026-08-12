@@ -22,16 +22,45 @@ type ModelEntry struct {
 	CacheWriteCostPer1M float64 `json:"cache_write_cost_per_1m"`
 }
 
+// modelLookupIndex là bản tiền xử lý của ModelEntry: mọi phép biến đổi chuỗi
+// (chữ thường, chuẩn hóa dấu chấm/gạch ngang) được tính một lần lúc dựng chỉ mục,
+// để Resolve chỉ so sánh chuỗi có sẵn — không phân bổ gì thêm mỗi lần gọi.
+type modelLookupIndex struct {
+	lowerProvider string // strings.ToLower(Provider)
+	normID        string // normalizeModelLookupID(ID): chữ thường, bỏ khoảng trắng, "." → "-"
+	lowerID       string // strings.ToLower(ID)
+	lowerName     string // strings.ToLower(Name)
+}
+
 // ModelRegistry lưu trữ các mô hình đã biết, hỗ trợ phân giải mờ và hợp nhất lúc chạy.
 type ModelRegistry struct {
 	mu     sync.RWMutex
 	models []ModelEntry
+	idx    []modelLookupIndex // song song với models, luôn đồng bộ dưới r.mu
+}
+
+// rebuildIndex dựng lại chỉ mục tra cứu từ r.models. Phải gọi khi đang giữ r.mu —
+// mọi thay đổi của r.models đều phải đi kèm rebuild để mô hình mới không bị
+// "không phân giải được" hoặc giữ dữ liệu cũ.
+func (r *ModelRegistry) rebuildIndex() {
+	r.idx = make([]modelLookupIndex, len(r.models))
+	for i, m := range r.models {
+		r.idx[i] = modelLookupIndex{
+			lowerProvider: strings.ToLower(m.Provider),
+			normID:        normalizeModelLookupID(m.ID),
+			lowerID:       strings.ToLower(m.ID),
+			lowerName:     strings.ToLower(m.Name),
+		}
+	}
 }
 
 // NewModelRegistry trả về một bảng đăng ký đã nạp baseline biên dịch.
 func NewModelRegistry() *ModelRegistry {
 	r := &ModelRegistry{}
+	r.mu.Lock()
 	r.models = append(r.models, generatedModels...)
+	r.rebuildIndex()
+	r.mu.Unlock()
 	return r
 }
 
@@ -69,27 +98,31 @@ func (r *ModelRegistry) Resolve(pattern string) (*ModelEntry, bool) {
 	if idx := strings.Index(pattern, "/"); idx > 0 {
 		prov := pattern[:idx]
 		modelID := pattern[idx+1:]
-		if entry, ok := lookupModelEntry(r.models, prov, modelID); ok {
+		if i, ok := r.lookupModelEntry(prov, modelID); ok {
+			entry := r.models[i]
 			return &entry, true
 		}
 		// Tiền tố vendor của OpenRouter (google/, x-ai/) không nhất thiết bằng tên Provider nội bộ,
 		// thử lại chỉ với modelID để đảm bảo "google/gemini-2.5-pro" khớp được mục gemini.
-		if entry, ok := lookupModelEntry(r.models, "", modelID); ok {
+		if i, ok := r.lookupModelEntry("", modelID); ok {
+			entry := r.models[i]
 			return &entry, true
 		}
 	}
 
-	if entry, ok := lookupModelEntry(r.models, "", pattern); ok {
+	if i, ok := r.lookupModelEntry("", pattern); ok {
+		entry := r.models[i]
 		return &entry, true
 	}
 
 	lower := strings.ToLower(pattern)
 	normalized := normalizeModelLookupID(pattern)
 	var candidates []int
-	for i := range r.models {
-		if strings.Contains(normalizeModelLookupID(r.models[i].ID), normalized) ||
-			strings.Contains(strings.ToLower(r.models[i].ID), lower) ||
-			strings.Contains(strings.ToLower(r.models[i].Name), lower) {
+	for i := range r.idx {
+		e := &r.idx[i]
+		if strings.Contains(e.normID, normalized) ||
+			strings.Contains(e.lowerID, lower) ||
+			strings.Contains(e.lowerName, lower) {
 			candidates = append(candidates, i)
 		}
 	}
@@ -170,4 +203,6 @@ func (r *ModelRegistry) MergeModels(fetched []ModelEntry) {
 			idx[key] = len(r.models) - 1
 		}
 	}
+	// Dựng lại chỉ mục sau mọi đột biến để mô hình mới/cập nhật vẫn phân giải được.
+	r.rebuildIndex()
 }
