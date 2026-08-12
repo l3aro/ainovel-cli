@@ -478,11 +478,12 @@ func (t *ContextTool) ContextSummary() string {
 //
 // Các key bị cắt sẽ được ghi vào result["_trimmed"] để tiện tra cứu log.
 func trimByBudget(result map[string]any, budget int) {
-	// Đo kích thước hiện tại trước
+	// Đo kích thước hiện tại trước (chỉ một lần cho toàn bộ map)
 	data, err := json.Marshal(result)
 	if err != nil || len(data) <= budget {
 		return
 	}
+	size := len(data)
 
 	// Liệt kê các key có thể cắt theo thứ tự ưu tiên từ thấp đến cao
 	trimOrder := []string{
@@ -498,15 +499,57 @@ func trimByBudget(result map[string]any, budget int) {
 		"relationship_state",
 	}
 
+	// Các container mà deleteContextKey cũng quét để xoá key trùng bên trong.
+	// PHẢI giữ đồng bộ với danh sách trong deleteContextKey: nếu lệch, copies sẽ sai
+	// và có thể ước lượng quá cao mức tiết kiệm -> vượt budget.
+	containers := []string{
+		"working_memory",
+		"episodic_memory",
+		"planning_memory",
+		"foundation_memory",
+		"reference_pack",
+	}
+
 	var trimmed []string
+	// Chi phí serialize của result["_trimmed"] khi kết thúc: 12 byte cố định
+	// (dấu phẩy + `"_trimmed":`) + `[` + `]` + các key đã cắt (dấu ngoặc kép, dấu phẩy).
+	// Cộng dồn chính xác khi thêm từng key; phải trừ vào budget vì bản thân
+	// _trimmed cũng nằm trong json.Marshal(result) cuối cùng.
+	trimmedOverhead := 0
 	for _, key := range trimOrder {
 		if _, ok := result[key]; !ok {
 			continue
 		}
+		// Marshal phần này đúng một lần để ước lượng mức tiết kiệm.
+		// save = kích thước phần × số vị trí sẽ bị xoá (top-level + các container chứa key).
+		// Cố tình KHÔNG tính chi phí tên key/dấu phẩy/dấu ngoặc nên save luôn THẤP HƠN
+		// mức tiết kiệm thực tế -> kích thước cuối không bao giờ vượt budget (tình huống
+		// xấu nhất chỉ xoá dư một key, an toàn; không bao giờ ước lượng quá cao).
+		secData, err := json.Marshal(result[key])
+		if err != nil {
+			continue
+		}
+		copies := 1
+		for _, containerKey := range containers {
+			section, ok := result[containerKey].(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, has := section[key]; has {
+				copies++
+			}
+		}
+		save := len(secData) * copies
+
 		deleteContextKey(result, key)
 		trimmed = append(trimmed, key)
-		data, err = json.Marshal(result)
-		if err != nil || len(data) <= budget {
+		if len(trimmed) == 1 {
+			trimmedOverhead = 14 + len(key) + 2 // `"_trimmed":[` + `]` + key có dấu ngoặc kép
+		} else {
+			trimmedOverhead += 3 + len(key) // dấu phẩy + key có dấu ngoặc kép
+		}
+		size -= save
+		if size+trimmedOverhead <= budget {
 			break
 		}
 	}

@@ -434,6 +434,95 @@ func TestTrimByBudgetRemovesMirroredMemoryKeys(t *testing.T) {
 	}
 }
 
+func TestTrimByBudgetRespectsBudgetContract(t *testing.T) {
+	// Budget đặt SÁT BIÊN theo cách đo động từ dữ liệu thật: nếu chỉ cắt key nhỏ
+	// ("references") thì kết quả kèm _trimmed vẫn vượt budget 1 byte, nên triển khai
+	// đúng buộc phải cắt tiếp "voice_samples". Nếu không trừ chi phí serialize của
+	// _trimmed vào ngân sách khi dừng, bài test này fail (kết quả cuối vượt budget).
+	bigA := map[string]string{"a": strings.Repeat("x", 300)}
+	bigB := strings.Repeat("y", 5000)
+	payload := func() map[string]any {
+		return map[string]any{
+			"references":    bigA, // chỉ ở top-level
+			"voice_samples": bigB,
+			"working_memory": map[string]any{
+				"voice_samples": bigB, // mirror: bị xoá cùng key top-level
+			},
+			"character_arcs": map[string]string{"protagonist": "survives"}, // ngoài trimOrder, phải giữ nguyên
+		}
+	}
+	jsonLen := func(m map[string]any) int {
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		return len(b)
+	}
+
+	onlyA := payload()
+	delete(onlyA, "references")
+	onlyA["_trimmed"] = []string{"references"}
+	budget := jsonLen(onlyA) - 1 // sát biên: cắt A chưa đủ, phải cắt thêm B
+
+	all := payload()
+	delete(all, "references")
+	delete(all, "voice_samples")
+	delete(all["working_memory"].(map[string]any), "voice_samples")
+	all["_trimmed"] = []string{"references", "voice_samples"}
+	if jsonLen(all) > budget {
+		t.Fatalf("test premise broken: fully trimmed payload %d still exceeds budget %d", jsonLen(all), budget)
+	}
+	if jsonLen(payload()) <= budget {
+		t.Fatalf("test premise broken: untrimmed payload %d does not exceed budget %d", jsonLen(payload()), budget)
+	}
+
+	result := payload()
+	trimByBudget(result, budget)
+
+	// Hợp đồng chính: sau khi cắt, JSON toàn bộ (kèm _trimmed) phải nằm trong budget.
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if len(data) > budget {
+		t.Fatalf("final size %d exceeds budget %d", len(data), budget)
+	}
+
+	// _trimmed phải liệt kê đúng các key đã bị xoá, đúng thứ tự trimOrder.
+	trimmed, ok := result["_trimmed"].([]string)
+	if !ok {
+		t.Fatal("expected _trimmed to be a []string")
+	}
+	expected := []string{"references", "voice_samples"}
+	if len(trimmed) != len(expected) {
+		t.Fatalf("expected %d trimmed keys, got %d: %v", len(expected), len(trimmed), trimmed)
+	}
+	for i, key := range expected {
+		if trimmed[i] != key {
+			t.Fatalf("expected _trimmed[%d] = %q, got %q", i, key, trimmed[i])
+		}
+	}
+
+	// Key đã cắt phải biến mất cả ở top-level lẫn trong container mirror.
+	for _, key := range expected {
+		if _, ok := result[key]; ok {
+			t.Fatalf("expected %q to be removed from top level", key)
+		}
+	}
+	wm, ok := result["working_memory"].(map[string]any)
+	if !ok {
+		t.Fatal("expected working_memory to remain available")
+	}
+	if _, ok := wm["voice_samples"]; ok {
+		t.Fatal("expected mirrored voice_samples to be trimmed from working_memory")
+	}
+
+	// Key ngoài trimOrder phải còn nguyên.
+	if _, ok := result["character_arcs"]; !ok {
+		t.Fatal("expected character_arcs to remain")
+	}
+}
+
 func TestContextToolSelectedMemoryRecallsStoryThreadsAndReviewLessons(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewStore(dir)
