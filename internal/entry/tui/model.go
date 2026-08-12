@@ -53,55 +53,67 @@ var toolSpinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯"
 
 // Model là trạng thái cấp cao nhất của TUI.
 type Model struct {
-	runtime        *host.Host
-	askBridge      *askUserBridge
-	askState       *askUserState
-	cocreate       *cocreateState
-	help           *helpState
-	modelSwitch    *modelSwitchState
-	report         *reportState
-	version        string
-	importer       *importState
-	importSeq      int
-	simulator      *simulationState
-	simSeq         int
-	compItems      []commandPaletteItem
-	compIdx        int
-	compActive     bool
-	snapshot       host.UISnapshot
-	events         []host.Event
-	eventIndex     map[string]int   // event.ID → chỉ số m.events; cập nhật tại chỗ khi sự kiện gọi đến
-	viewport       viewport.Model   // viewport luồng sự kiện
-	streamVP       viewport.Model   // viewport output stream
-	detailVP       viewport.Model   // viewport chi tiết bên phải
-	stateVP        viewport.Model   // viewport thanh trạng thái bên trái (có thể cuộn)
-	streamBuf      *strings.Builder // bộ đệm tích lũy văn bản của round stream đang mở
-	streamRounds   []string         // các round stream đã đóng (đã materialize), round đang mở nằm trong streamBuf
-	textarea       textarea.Model
-	width          int
-	height         int
-	autoScroll     bool
-	streamScroll   bool      // tự động theo dõi bảng stream
-	streamDirty    bool      // streamBuf có delta chưa được làm mới; được gộp 60fps bởi streamFlushTick
-	lastKeyAt      time.Time // thời điểm nhấn phím không phải Enter gần nhất; throttle KeyEnter tránh \n paste kích hoạt submit
-	inputHistory   []string  // lịch sử input đã submit (loại trùng: không lặp liền kề)
-	historyIdx     int       // chỉ số duyệt hiện tại; == len(inputHistory) nghĩa là "chưa duyệt, đang chỉnh sửa bản nháp"
-	historyDraft   string    // bản nháp lưu trước khi vào chế độ duyệt lịch sử, khôi phục khi về cuối
-	focusPane      focusPane
-	hoverPane      focusPane
-	hoverActive    bool
-	mode           appMode
-	startupMode    startupMode
-	cocreateSeq    int
-	reportSeq      int
-	err            error
-	spinnerIdx     int
-	toolSpinnerIdx int  // chỉ số khung độc lập cho dòng đang chạy trong luồng sự kiện (tick 150ms, không ảnh hưởng thanh trên/ngôi sao)
-	cursorIdx      int  // chỉ số khung con trỏ stream (tick độc lập)
-	streamRound    int  // đếm vòng output stream
-	quitPending    bool // xác nhận thoát bằng Ctrl+C hai lần
-	abortPending   bool // đang chờ Done quay về sau khi tạm dừng thủ công
-	mouseOff       bool // true khi đã tắt báo cáo chuột, cho phép kéo chọn sao chép nguyên bản; bật lại khi chuyển lần nữa
+	runtime     *host.Host
+	askBridge   *askUserBridge
+	askState    *askUserState
+	cocreate    *cocreateState
+	help        *helpState
+	modelSwitch *modelSwitchState
+	report      *reportState
+	version     string
+	importer    *importState
+	importSeq   int
+	simulator   *simulationState
+	simSeq      int
+	compItems   []commandPaletteItem
+	compIdx     int
+	compActive  bool
+	snapshot    host.UISnapshot
+	events      []host.Event
+	eventIndex  map[string]int // event.ID → chỉ số m.events; cập nhật tại chỗ khi sự kiện gọi đến
+	// Bộ đệm render luồng sự kiện: tránh render lại toàn bộ 500 dòng mỗi tick spinner (150ms/350ms).
+	// eventLines[i] là dòng đã render của m.events[i]; cache chỉ hợp lệ khi eventRenderWidth khớp
+	// eventFlowWidth() hiện tại. Tick spinner chỉ render lại các dòng đang chạy (khung thay đổi),
+	// dòng hoàn thành giữ nguyên byte-for-byte; sự kiện mới được nối tiếp từ eventsCacheLen.
+	eventLines       []string // dòng đã render theo chỉ số m.events
+	eventRenderWidth int      // chiều rộng đã dùng để render eventLines; 0 = chưa từng render
+	eventsCacheLen   int      // số sự kiện đã có dòng trong cache (đồng bộ len(eventLines))
+	// runningEventIdx là danh sách chỉ số các sự kiện đang chạy (spinner), duy trì tăng dần trong
+	// applyEvent thay vì quét O(n) toàn bộ events mỗi tick. DISPATCH của agent con và TOOL lồng nhau
+	// có thể chạy đồng thời (observer giữ dispatchStarts mở khi agent con đang gọi công cụ) nên đây
+	// là danh sách, không phải một chỉ số đơn.
+	runningEventIdx []int
+	viewport        viewport.Model   // viewport luồng sự kiện
+	streamVP        viewport.Model   // viewport output stream
+	detailVP        viewport.Model   // viewport chi tiết bên phải
+	stateVP         viewport.Model   // viewport thanh trạng thái bên trái (có thể cuộn)
+	streamBuf       *strings.Builder // bộ đệm tích lũy văn bản của round stream đang mở
+	streamRounds    []string         // các round stream đã đóng (đã materialize), round đang mở nằm trong streamBuf
+	textarea        textarea.Model
+	width           int
+	height          int
+	autoScroll      bool
+	streamScroll    bool      // tự động theo dõi bảng stream
+	streamDirty     bool      // streamBuf có delta chưa được làm mới; được gộp 60fps bởi streamFlushTick
+	lastKeyAt       time.Time // thời điểm nhấn phím không phải Enter gần nhất; throttle KeyEnter tránh \n paste kích hoạt submit
+	inputHistory    []string  // lịch sử input đã submit (loại trùng: không lặp liền kề)
+	historyIdx      int       // chỉ số duyệt hiện tại; == len(inputHistory) nghĩa là "chưa duyệt, đang chỉnh sửa bản nháp"
+	historyDraft    string    // bản nháp lưu trước khi vào chế độ duyệt lịch sử, khôi phục khi về cuối
+	focusPane       focusPane
+	hoverPane       focusPane
+	hoverActive     bool
+	mode            appMode
+	startupMode     startupMode
+	cocreateSeq     int
+	reportSeq       int
+	err             error
+	spinnerIdx      int
+	toolSpinnerIdx  int  // chỉ số khung độc lập cho dòng đang chạy trong luồng sự kiện (tick 150ms, không ảnh hưởng thanh trên/ngôi sao)
+	cursorIdx       int  // chỉ số khung con trỏ stream (tick độc lập)
+	streamRound     int  // đếm vòng output stream
+	quitPending     bool // xác nhận thoát bằng Ctrl+C hai lần
+	abortPending    bool // đang chờ Done quay về sau khi tạm dừng thủ công
+	mouseOff        bool // true khi đã tắt báo cáo chuột, cho phép kéo chọn sao chép nguyên bản; bật lại khi chuyển lần nữa
 }
 
 // NewModel tạo TUI Model.
@@ -208,16 +220,37 @@ func (m *Model) paneHighlighted(pane focusPane) bool {
 	return m.hoverActive && m.hoverPane == pane
 }
 
-// hasRunningEvent kiểm tra có sự kiện gọi nào chưa hoàn thành (spinner vẫn đang quay) không.
-// toolSpinnerTick dùng hàm này để quyết định có cần re-render không: khi không có sự kiện đang chạy,
-// khung spinner không ảnh hưởng output, toàn bộ refreshEventViewport là công việc vô ích.
-func (m *Model) hasRunningEvent() bool {
-	for i := range m.events {
-		if m.events[i].Running() {
-			return true
+// rebuildEventLines render toàn bộ luồng sự kiện vào cache (chiều rộng thay đổi hoặc cache chưa tồn tại).
+// Dùng khung spinner hiện tại, giống renderEventContent toàn bộ.
+func (m *Model) rebuildEventLines(centerW int) {
+	m.eventLines = make([]string, len(m.events))
+	for i, ev := range m.events {
+		m.eventLines[i] = renderEventLine(ev, centerW, m.toolSpinnerIdx)
+	}
+	m.eventRenderWidth = centerW
+	m.eventsCacheLen = len(m.events)
+}
+
+// rerenderEventLine render lại đúng dòng evIdx trong cache sau khi sự kiện bị biến đổi
+// (hoàn thành / thất bại / cập nhật Summary, ...); các dòng khác giữ nguyên.
+// Cache chưa xây hoặc chỉ số ngoài phạm vi thì bỏ qua: refreshEventViewport sẽ xây lại
+// toàn bộ nếu chiều rộng thay đổi, nên render theo chiều rộng cũ vẫn nhất quán.
+func (m *Model) rerenderEventLine(evIdx int) {
+	if evIdx < 0 || evIdx >= len(m.eventLines) {
+		return
+	}
+	m.eventLines[evIdx] = renderEventLine(m.events[evIdx], m.eventRenderWidth, m.toolSpinnerIdx)
+}
+
+// removeRunningEvent xóa chỉ số khỏi danh sách dòng đang chạy khi sự kiện hoàn thành.
+// Danh sách nhỏ (≤ vài dòng chạy đồng thời), duyệt tuyến tính là đủ.
+func (m *Model) removeRunningEvent(idx int) {
+	for i, r := range m.runningEventIdx {
+		if r == idx {
+			m.runningEventIdx = append(m.runningEventIdx[:i], m.runningEventIdx[i+1:]...)
+			return
 		}
 	}
-	return false
 }
 
 // flushStreamIfDirty render streamRounds đã tích lũy vào viewport; đánh dấu đã làm mới.
@@ -232,9 +265,28 @@ func (m *Model) flushStreamIfDirty() bool {
 }
 
 // refreshEventViewport render lại nội dung luồng sự kiện và cập nhật viewport.
+// Nội dung được cache theo dòng (m.eventLines): tick spinner 150ms/350ms chỉ render lại các
+// dòng đang chạy (khung spinner thay đổi) và nối tiếp sự kiện mới đến sau lần xây cache trước,
+// thay vì render lại toàn bộ tối đa 500 dòng. Chiều rộng thay đổi → xây lại toàn bộ.
 func (m *Model) refreshEventViewport() {
 	centerW := m.eventFlowWidth()
-	content := renderEventContent(m.events, centerW, m.toolSpinnerIdx)
+	if m.eventRenderWidth != centerW {
+		// Resize cửa sổ: mọi dòng cache render theo chiều rộng cũ đều sai, xây lại toàn bộ
+		m.rebuildEventLines(centerW)
+	} else {
+		// Nối tiếp các sự kiện mới đến sau khi cache được xây (applyEvent chưa render)
+		for i := m.eventsCacheLen; i < len(m.events); i++ {
+			m.eventLines = append(m.eventLines, renderEventLine(m.events[i], centerW, m.toolSpinnerIdx))
+		}
+		m.eventsCacheLen = len(m.events)
+		// Khung spinner thay đổi theo tick → chỉ render lại các dòng đang chạy
+		for _, idx := range m.runningEventIdx {
+			if idx < m.eventsCacheLen {
+				m.eventLines[idx] = renderEventLine(m.events[idx], centerW, m.toolSpinnerIdx)
+			}
+		}
+	}
+	content := strings.Join(m.eventLines, "\n")
 	if activity := renderEventActivity(m.snapshot, m.spinnerIdx, centerW); activity != "" {
 		if strings.TrimSpace(content) != "" {
 			content += "\n" + activity

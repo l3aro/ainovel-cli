@@ -562,8 +562,9 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		m.toolSpinnerIdx = (m.toolSpinnerIdx + 1) % len(toolSpinnerFrames)
 		// Làm mới spinner của dòng "đang tiến hành" trong luồng sự kiện (150ms, nhịp độc lập).
 		// Khung spinner chỉ ảnh hưởng đến dòng sự kiện đang chạy, các dòng đã hoàn thành có đầu ra byte-for-byte như nhau;
-		// khi không có sự kiện đang chạy thì toàn bộ việc render lại là vô nghĩa, bỏ qua.
-		if m.snapshot.IsRunning && m.hasRunningEvent() {
+		// khi không có sự kiện đang chạy (runningEventIdx rỗng) thì toàn bộ việc render lại là vô nghĩa, bỏ qua.
+		// refreshEventViewport dùng cache nên chỉ render lại các dòng đang chạy, không quét/render toàn bộ 500 dòng.
+		if m.snapshot.IsRunning && len(m.runningEventIdx) > 0 {
 			m.refreshEventViewport()
 		}
 		return m, tickToolSpinner(), true
@@ -676,6 +677,7 @@ func (m *Model) applyEvent(ev host.Event) {
 	if ev.ID != "" {
 		if idx, ok := m.eventIndex[ev.ID]; ok && idx >= 0 && idx < len(m.events) {
 			existing := &m.events[idx]
+			wasRunning := existing.Running()
 			if !ev.FinishedAt.IsZero() {
 				existing.FinishedAt = ev.FinishedAt
 			}
@@ -692,6 +694,13 @@ func (m *Model) applyEvent(ev host.Event) {
 			if ev.Summary != "" {
 				existing.Summary = ev.Summary
 			}
+			// Sự kiện đã tồn tại bị biến đổi (hoàn thành / thất bại / cập nhật Summary tiến trình):
+			// render lại đúng dòng đó trong cache, các dòng khác giữ nguyên byte-for-byte.
+			m.rerenderEventLine(idx)
+			// Hoàn thành → gỡ khỏi danh sách dòng đang chạy (duy trì tăng dần, không quét O(n))
+			if wasRunning && !existing.Running() {
+				m.removeRunningEvent(idx)
+			}
 			return
 		}
 	}
@@ -699,11 +708,34 @@ func (m *Model) applyEvent(ev host.Event) {
 	m.events = append(m.events, ev)
 	if ev.ID != "" {
 		m.eventIndex[ev.ID] = len(m.events) - 1
+		// Theo dõi tăng dần chỉ số dòng đang chạy thay vì quét toàn bộ events mỗi tick spinner
+		if ev.Running() {
+			m.runningEventIdx = append(m.runningEventIdx, len(m.events)-1)
+		}
 	}
 	if len(m.events) > maxEvents {
 		drop := len(m.events) - maxEvents
 		m.events = m.events[drop:]
 		m.rebuildEventIndex()
+		// Cắt cache đồng bộ với events để giữ cap maxEvents (cache có thể ngắn hơn events
+		// khi sự kiện mới chưa được render, nên phải kẹp drop theo độ dài cache)
+		if len(m.eventLines) > 0 {
+			if drop >= len(m.eventLines) {
+				m.eventLines = nil
+				m.eventsCacheLen = 0
+			} else {
+				m.eventLines = m.eventLines[drop:]
+				m.eventsCacheLen = len(m.eventLines)
+			}
+		}
+		// Dịch chỉ số dòng đang chạy theo lượng cắt; dòng bị cắt (cũ nhất) thì loại bỏ
+		running := m.runningEventIdx[:0]
+		for _, idx := range m.runningEventIdx {
+			if idx >= drop {
+				running = append(running, idx-drop)
+			}
+		}
+		m.runningEventIdx = running
 	}
 }
 
@@ -756,6 +788,10 @@ func (m *Model) rebuildEventIndex() {
 func (m *Model) resetOutputPanels() {
 	m.events = nil
 	m.eventIndex = make(map[string]int)
+	m.eventLines = nil
+	m.eventRenderWidth = 0
+	m.eventsCacheLen = 0
+	m.runningEventIdx = nil
 	m.viewport.SetContent("")
 	m.viewport.GotoTop()
 	m.streamBuf.Reset()
