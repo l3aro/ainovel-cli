@@ -94,15 +94,35 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 }
 
 func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool) error {
+	return consumeLoop(eng.Events(), eng.Stream(), eng.Done(), stdout, stderr, roundHasContent)
+}
+
+// consumeLoop tiêu thụ sự kiện/stream cho đến khi kênh Done báo kết thúc hoặc cả ba kênh đều đóng.
+// Nhận kênh trực tiếp (không qua Host) để test độc lập mà không cần dựng Host.
+//
+// Khi một kênh đóng (Host.Close đóng done+events+streamCh cùng lúc), kênh đó được gán nil:
+// trong select, kênh nil chặn vĩnh viễn nên nhánh tương ứng bị vô hiệu hóa — tránh vòng lặp
+// quay spin 100% CPU trên kênh đóng luôn sẵn sàng, đồng thời vẫn rút cạn các kênh còn mở.
+// Khi cả ba kênh đều nil, select không còn nhánh nào sẵn sàng (không có default để không
+// trả về sớm lúc engine đang chạy nhưng chưa có dữ liệu) nên phải kiểm tra tường minh.
+func consumeLoop(events <-chan host.Event, stream <-chan string, done <-chan struct{}, stdout, stderr io.Writer, roundHasContent bool) error {
 	for {
 		select {
-		case ev, ok := <-eng.Events():
+		case ev, ok := <-events:
 			if !ok {
-				return nil
+				events = nil
+				if events == nil && stream == nil && done == nil {
+					return nil
+				}
+				continue
 			}
 			writeEvent(stderr, ev)
-		case delta, ok := <-eng.Stream():
+		case delta, ok := <-stream:
 			if !ok {
+				stream = nil
+				if events == nil && stream == nil && done == nil {
+					return nil
+				}
 				continue
 			}
 			if delta == host.StreamClearSentinel {
@@ -121,24 +141,39 @@ func consume(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool) err
 				return err
 			}
 			roundHasContent = true
-		case _, ok := <-eng.Done():
+		case _, ok := <-done:
 			if !ok {
-				return nil
+				done = nil
+				if events == nil && stream == nil && done == nil {
+					return nil
+				}
+				continue
 			}
-			return drainPending(eng, stdout, stderr, roundHasContent)
+			return drainPendingLoop(events, stream, stdout, stderr, roundHasContent)
 		}
 	}
 }
 
 func drainPending(eng *host.Host, stdout, stderr io.Writer, roundHasContent bool) error {
+	return drainPendingLoop(eng.Events(), eng.Stream(), stdout, stderr, roundHasContent)
+}
+
+// drainPendingLoop rút cạn nốt sự kiện/stream còn đọng rồi trả về. Cùng quy tắc chống spin
+// như consumeLoop: kênh đóng được gán nil để vô hiệu hóa nhánh select. Khi cả hai kênh đều nil,
+// select rơi vào default và trả về nil như trước đây — default chỉ chạy khi không còn nhánh
+// nào sẵn sàng, nên với kênh còn mở (đang chờ dữ liệu) hành vi không đổi.
+func drainPendingLoop(events <-chan host.Event, stream <-chan string, stdout, stderr io.Writer, roundHasContent bool) error {
 	for {
 		select {
-		case ev, ok := <-eng.Events():
-			if ok {
-				writeEvent(stderr, ev)
-			}
-		case delta, ok := <-eng.Stream():
+		case ev, ok := <-events:
 			if !ok {
+				events = nil
+				continue
+			}
+			writeEvent(stderr, ev)
+		case delta, ok := <-stream:
+			if !ok {
+				stream = nil
 				continue
 			}
 			if delta == host.StreamClearSentinel {
