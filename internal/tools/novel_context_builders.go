@@ -1,10 +1,15 @@
 package tools
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"log/slog"
 	"slices"
 
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/rules"
+	"github.com/voocel/ainovel-cli/internal/store"
 	"github.com/voocel/ainovel-cli/internal/stylestat"
 )
 
@@ -368,48 +373,116 @@ func (t *ContextTool) buildChapterContext(result map[string]any, state contextBu
 // Thống kê do code xử lý (tính xác định), phán quyết do LLM đảm nhận (Biên tập viên chấm điểm
 // theo con số ở chiều aesthetic, Người viết dựa đó tự tránh). Khi chưa đủ chương, stylestat
 // trả về nil, không tiêm.
+//
+// Kết quả chỉ thay đổi khi commit chương, nên ưu tiên bộ đệm commit đã lưu (meta/style_stats.json):
+// chỉ đọc lại toàn bộ sách và tính lại khi bộ đệm thiếu hoặc vân tay nội dung không khớp
+// (danh sách chương hoàn thành / tiêu đề đề cương / stopwords đã thay đổi sau commit).
 func (t *ContextTool) buildStyleStats(envelope *chapterContextEnvelope, state contextBuildState) {
 	if state.progress == nil || len(state.progress.CompletedChapters) == 0 {
 		return
 	}
 	completed := slices.Clone(state.progress.CompletedChapters)
 	slices.Sort(completed)
+	fingerprint := styleStatsFingerprint(t.store, completed)
+
+	// Bộ đệm commit đã lưu còn khớp vân tay nội dung thì tái sử dụng:
+	// tránh đọc lại toàn bộ sách và tính lại mỗi lần gọi novel_context
+	if stats, cachedFingerprint, err := t.store.StyleStats.Load(); err == nil && stats != nil && cachedFingerprint == fingerprint {
+		envelope.Episodic["style_stats"] = stats
+		return
+	}
+
+	// Bộ đệm thiếu hoặc cũ: tính lại theo dữ liệu hiện tại, lưu bộ đệm (thất bại chỉ cảnh báo, vẫn tiêm kết quả mới)
+	stats := computeStyleStats(t.store, completed)
+	if stats == nil {
+		return
+	}
+	if err := t.store.StyleStats.Save(stats, fingerprint); err != nil {
+		slog.Warn("lưu bộ đệm thống kê phong cách thất bại, bỏ qua", "module", "novel_context", "err", err)
+	}
+	envelope.Episodic["style_stats"] = stats
+}
+
+// styleStatsFingerprint tính vân tay nội dung cho bộ đệm thống kê phong cách: băm sha256
+// (hex, 16 ký tự đầu) của các đầu vào ngoài nội dung chương có thể thay đổi sau commit —
+// danh sách chương hoàn thành (sắp xếp tăng dần), tiêu đề đề cương, stopwords nhân vật/cast
+// (tiêu đề và stopwords sắp xếp để vân tay chỉ phụ thuộc vào tập nội dung, không phụ thuộc
+// thứ tự lưu — thứ tự không ảnh hưởng kết quả thống kê).
+// Dạng chuẩn hóa là JSON của struct với thứ tự trường cố định và slice đã sắp xếp:
+// chuỗi được JSON escape, không có ký tự phân tách trùng với nội dung đầu vào.
+// Nội dung chương không nằm trong vân tay: chúng chỉ thay đổi qua đường commit, nơi bộ đệm
+// luôn được tính lại và lưu; đọc lại toàn bộ sách mỗi lần gọi sẽ phá vỡ lợi ích hiệu năng.
+// Hướng an toàn: vân tay lệch → tính lại (đúng, chỉ chậm hơn); bỏ sót cần trùng sha256, bất khả thi.
+func styleStatsFingerprint(s *store.Store, completed []int) string {
+	var titles []string
+	if outline, err := s.Outline.LoadOutline(); err == nil {
+		for _, entry := range outline {
+			titles = append(titles, entry.Title)
+		}
+	}
+	stopwords := collectStyleStopwords(s)
+
+	chs := slices.Clone(completed)
+	slices.Sort(chs)
+	slices.Sort(titles)
+	slices.Sort(stopwords)
+
+	// json.Marshal không thể lỗi với []int/[]string; nhánh lỗi chỉ để phòng thủ
+	raw, err := json.Marshal(styleStatsFingerprintInput{
+		Chapters:  chs,
+		Titles:    titles,
+		Stopwords: stopwords,
+	})
+	if err != nil {
+		return hex.EncodeToString(make([]byte, sha256.Size))[:16]
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// styleStatsFingerprintInput là đầu vào chuẩn hóa cho vân tay bộ đệm thống kê phong cách.
+type styleStatsFingerprintInput struct {
+	Chapters  []int    `json:"chapters"`
+	Titles    []string `json:"titles"`
+	Stopwords []string `json:"stopwords"`
+}
+
+// computeStyleStats tính thống kê phong cách toàn tác phẩm từ các chương đã hoàn thành.
+// Dùng chung cho đường commit (tính một lần rồi lưu bộ đệm) và novel_context (tính lại khi bộ đệm cũ).
+// Trả về nil khi chưa đủ số chương tối thiểu.
+func computeStyleStats(s *store.Store, completed []int) *stylestat.Stats {
 	chapters := make([]string, 0, len(completed))
 	for _, ch := range completed {
 		// Bỏ qua nếu đọc một chương riêng lẻ thất bại: thống kê là sự kiện best-effort, không vì thiếu một chương mà từ bỏ toàn cục
-		if text, err := t.store.Drafts.LoadChapterText(ch); err == nil && text != "" {
+		if text, err := s.Drafts.LoadChapterText(ch); err == nil && text != "" {
 			chapters = append(chapters, text)
 		}
 	}
 
 	var titles []string
-	if outline, err := t.store.Outline.LoadOutline(); err == nil {
+	if outline, err := s.Outline.LoadOutline(); err == nil {
 		for _, entry := range outline {
 			titles = append(titles, entry.Title)
 		}
 	}
 
-	stats := stylestat.Compute(stylestat.Input{
+	return stylestat.Compute(stylestat.Input{
 		Chapters:  chapters,
 		Titles:    titles,
-		Stopwords: t.styleStopwords(),
+		Stopwords: collectStyleStopwords(s),
 	})
-	if stats == nil {
-		return
-	}
-	envelope.Episodic["style_stats"] = stats
 }
 
-// styleStopwords thu thập tên nhân vật và bí danh để lọc khi khai thác cụm từ — tên xuất hiện tự nhiên có tần suất cao, không phải vấn đề phong cách.
-func (t *ContextTool) styleStopwords() []string {
+// collectStyleStopwords thu thập tên nhân vật và bí danh để lọc khi khai thác cụm từ — tên xuất hiện tự nhiên có tần suất cao, không phải vấn đề phong cách.
+func collectStyleStopwords(s *store.Store) []string {
 	var words []string
-	if chars, err := t.store.Characters.Load(); err == nil {
+	if chars, err := s.Characters.Load(); err == nil {
 		for _, c := range chars {
 			words = append(words, c.Name)
 			words = append(words, c.Aliases...)
 		}
 	}
-	if cast, err := t.store.Cast.RecentActive(50); err == nil {
+	if cast, err := s.Cast.RecentActive(50); err == nil {
 		for _, e := range cast {
 			words = append(words, e.Name)
 			words = append(words, e.Aliases...)

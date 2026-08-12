@@ -252,6 +252,10 @@ func (t *CommitChapterTool) Execute(_ context.Context, args json.RawMessage) (js
 		return nil, fmt.Errorf("mark chapter complete: %w: %w", errs.ErrStoreWrite, err)
 	}
 
+	// 5b. Tính lại thống kê phong cách toàn tác phẩm sau khi có chương mới và lưu bộ đệm cho novel_context tái sử dụng.
+	// Best-effort: thất bại không chặn commit — lần gọi novel_context sau tự phát hiện bộ đệm cũ và tính lại.
+	t.refreshStyleStats()
+
 	// 6. Kiểm tra xem có cần xét duyệt không
 	progress, err := t.store.Progress.Load()
 	if err != nil {
@@ -350,6 +354,26 @@ func (t *CommitChapterTool) checkRules(text string, wordCount int) []rules.Viola
 	return append(violations, rules.Check(text, wordCount, bundle.Structured)...)
 }
 
+// refreshStyleStats tính lại thống kê phong cách toàn tác phẩm từ các chương đã hoàn thành và lưu bộ đệm.
+// Gọi sau mỗi lần lưu chương (commit/rewrite) — lúc này dữ liệu trên đĩa là bản mới nhất, novel_context
+// tái sử dụng bộ đệm này thay vì đọc lại toàn bộ sách và tính lại mỗi lần gọi.
+// Best-effort: bất kỳ lỗi nào cũng chỉ cảnh báo, không ảnh hưởng kết quả commit.
+func (t *CommitChapterTool) refreshStyleStats() {
+	progress, err := t.store.Progress.Load()
+	if err != nil || progress == nil || len(progress.CompletedChapters) == 0 {
+		return
+	}
+	completed := slices.Clone(progress.CompletedChapters)
+	slices.Sort(completed)
+	stats := computeStyleStats(t.store, completed)
+	if stats == nil {
+		return
+	}
+	if err := t.store.StyleStats.Save(stats, styleStatsFingerprint(t.store, completed)); err != nil {
+		slog.Warn("lưu bộ đệm thống kê phong cách thất bại, bỏ qua", "module", "commit", "err", err)
+	}
+}
+
 // executeRewriteCommit xử lý lưu chương khi đánh bóng/viết lại: ghi đè bản chính và tóm tắt, cập nhật số từ, drain hàng đợi.
 // Bỏ qua toàn bộ thao tác bổ sung trạng thái thế giới (timeline / foreshadow / relationship / state_changes) và kiểm tra biên giới cung,
 // vì những thứ này đã được áp dụng trong lần lưu gốc của chương.
@@ -400,6 +424,9 @@ func (t *CommitChapterTool) executeRewriteCommit(
 	if err := t.store.Progress.MarkChapterComplete(chapter, wordCount, hookType, dominantStrand); err != nil {
 		return nil, fmt.Errorf("rewrite: update word count: %w: %w", errs.ErrStoreWrite, err)
 	}
+
+	// 4b. Tính lại thống kê phong cách sau khi chương đã bị ghi đè và lưu bộ đệm (best-effort, không chặn lưu)
+	t.refreshStyleStats()
 
 	// 5. Drain hàng đợi chờ xử lý; khi hàng đợi rỗng CompleteRewrite sẽ tự chuyển flow về writing
 	if err := t.store.Progress.CompleteRewrite(chapter); err != nil {

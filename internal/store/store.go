@@ -27,6 +27,7 @@ type Store struct {
 	Sessions    *SessionStore
 	Usage       *UsageStore
 	Simulation  *SimulationStore
+	StyleStats  *StyleStatsStore
 
 	crossMu sync.Mutex // bảo vệ các thao tác nguyên tử liên miền
 }
@@ -52,6 +53,7 @@ func NewStore(dir string) *Store {
 		Sessions:    NewSessionStore(newIO(dir)),
 		Usage:       NewUsageStore(newIO(dir)),
 		Simulation:  NewSimulationStore(newIO(dir)),
+		StyleStats:  NewStyleStatsStore(newIO(dir)),
 	}
 }
 
