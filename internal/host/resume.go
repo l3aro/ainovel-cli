@@ -33,7 +33,7 @@ func buildResumePromptFrom(store *storepkg.Store, progress *domain.Progress, met
 		}
 		progress = p
 	}
-	if progress == nil || progress.Phase == domain.PhaseComplete {
+	if progress == nil || progress.Phase == domain.PhaseInit || progress.Phase == domain.PhaseComplete {
 		return "", "", nil
 	}
 
