@@ -96,8 +96,8 @@ func TestGuardExclusive(t *testing.T) {
 		cocreating bool
 		wantErr    string // rỗng = mong muốn cho qua
 	}{
-		{"running", lifecycleRunning, false, "运行中"},
-		{"cocreating", lifecyclePaused, true, "阶段共创"},
+		{"running", lifecycleRunning, false, "coordinator đang chạy"},
+		{"cocreating", lifecyclePaused, true, "đồng sáng tác giai đoạn đang diễn ra"},
 		{"idle free", lifecycleIdle, false, ""},
 		{"paused free", lifecyclePaused, false, ""},
 	}
@@ -179,7 +179,7 @@ func TestBuildStoryStateSummary_Populated(t *testing.T) {
 	}
 
 	got := buildStoryStateSummary(st)
-	for _, want := range []string{"影之诗", "已完成 3 章", "下一章为第 4 章", "主角登临绝巅", "师门血仇未报", "预计 4-6 卷"} {
+	for _, want := range []string{"影之诗", "Đã hoàn thành 3 chương", "chương tiếp theo là chương 4", "主角登临绝巅", "师门血仇未报", "预计 4-6 卷"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("tóm tắt phải chứa %q, thực tế:\n%s", want, got)
 		}
