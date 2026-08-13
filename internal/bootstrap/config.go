@@ -111,10 +111,24 @@ var knownRoles = map[string]bool{
 	"editor":      true,
 }
 
+// envRef ghi chú một trường cấu hình được phân giải từ biến môi trường tại lúc tải
+// (raw = chuỗi "env:NAME" trong file cấu hình, resolved = giá trị biến lúc tải).
+// SaveConfig dùng để khôi phục dạng "env:NAME" khi ghi đĩa — tránh viết bí mật đã
+// phân giải xuống config.json — và chỉ khôi phục nếu giá trị hiện tại vẫn bằng resolved
+// (trường bị đổi từ lúc tải, ví dụ qua /model, thì giữ nguyên giá trị mới).
+type envRef struct {
+	raw      string
+	resolved string
+}
+
 // Config cấu hình ứng dụng tiểu thuyết.
 type Config struct {
 	// Trường runtime (không serialize ra JSON)
 	OutputDir string `json:"-"` // Thư mục gốc đầu ra
+	// EnvRefs ghi chú nội bộ các trường được phân giải từ biến môi trường (dạng "env:NAME",
+	// xem envRefPrefix trong configfile.go). Không serialize ra JSON; chỉ dùng để
+	// SaveConfig khôi phục dạng tham chiếu khi ghi đĩa.
+	EnvRefs map[string]envRef `json:"-"`
 
 	// Cấu hình LLM mặc định
 	Provider  string `json:"provider"` // Nhà cung cấp mặc định (key trong map Providers)

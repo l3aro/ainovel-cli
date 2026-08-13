@@ -9,6 +9,13 @@
   // Kho thông tin xác thực nhà cung cấp. Key do người dùng tự đặt, dùng để trường provider bên trên tham chiếu.
   // Các nhà cung cấp đã biết (openai/anthropic/gemini/openrouter/deepseek/qwen/glm/grok/mimo/ollama/bedrock)
   // có thể bỏ qua type; proxy tùy chỉnh phải khai báo type tường minh để chỉ định giao thức API.
+  // Mọi giá trị chuỗi có thể tham chiếu biến môi trường thay vì ghi trực tiếp, ví dụ:
+  //   "api_key": "env:OPENROUTER_API_KEY"
+  // Áp dụng cho mọi trường chuỗi của cấu hình — kể cả giá trị chuỗi lồng trong extra_body/extra
+  // (ví dụ "extra.headers.X-API-Key": "env:PROXY_HEADER_KEY"), không áp dụng cho khóa map.
+  // Biến được phân giải lúc khởi động; chưa đặt hoặc rỗng sẽ báo lỗi và dừng (fail loud).
+  // Khi lưu cấu hình (ví dụ sau khi chuyển model qua /model), dạng env: được giữ nguyên —
+  // giá trị đã phân giải không bị ghi ngược xuống đĩa.
   "providers": {
     "openrouter": {
       "api_key": "sk-or-v1-xxx",

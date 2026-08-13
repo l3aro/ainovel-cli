@@ -225,6 +225,12 @@ Truy cập [openrouter.ai](https://openrouter.ai) để đăng ký API key. Hỗ
 }
 ```
 
+> **Lưu ý**: Mọi giá trị chuỗi trong cấu hình có thể tham chiếu biến môi trường thay vì ghi trực tiếp, ví dụ
+> `"api_key": "env:OPENROUTER_API_KEY"` — kể cả giá trị chuỗi lồng trong `extra_body`/`extra`
+> (ví dụ `"extra.headers.X-API-Key": "env:PROXY_HEADER_KEY"`). Biến được phân giải lúc khởi động; chưa đặt hoặc
+> rỗng sẽ báo lỗi và dừng. Khi lưu cấu hình (ví dụ sau khi chuyển model qua /model), dạng `env:` được giữ nguyên —
+> giá trị đã phân giải không bị ghi ngược xuống đĩa.
+
 ---
 
 ### Anthropic / OpenAI

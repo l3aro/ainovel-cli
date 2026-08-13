@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/voocel/ainovel-cli/internal/errs"
@@ -110,6 +111,186 @@ func TestLoadConfig_ValidMergeWorks(t *testing.T) {
 	}
 }
 
+// env: cho phép tham chiếu biến môi trường trong giá trị chuỗi cấu hình
+// (api_key/base_url/type/model/...); biến chưa đặt hoặc rỗng phải báo lỗi config.
+func TestLoadConfig_EnvRefExpanded(t *testing.T) {
+	writeGlobal(t, `{
+  "provider": "openrouter",
+  "model": "google/gemini-2.5-flash",
+  "providers": {
+    "openrouter": {
+      "api_key": "env:TEST_AI_KEY",
+      "base_url": "env:TEST_AI_BASE",
+      "extra_body": { "temperature": 0.8, "user_id": "env:TEST_BODY_USER" },
+      "extra": { "headers": { "X-API-Key": "env:TEST_HEADER_KEY" } }
+    }
+  }
+}`)
+	t.Setenv("TEST_AI_KEY", "sk-env-123456")
+	t.Setenv("TEST_AI_BASE", "https://env.example.com/v1")
+	t.Setenv("TEST_HEADER_KEY", "hdr-env-789")
+	t.Setenv("TEST_BODY_USER", "user-env-42")
+	proj := t.TempDir()
+	t.Chdir(proj)
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("cấu hình env hợp lệ không được báo lỗi: %v", err)
+	}
+	pc := cfg.Providers["openrouter"]
+	if pc.APIKey != "sk-env-123456" {
+		t.Errorf("api_key phải được phân giải từ biến môi trường, nhận được %q", pc.APIKey)
+	}
+	if pc.BaseURL != "https://env.example.com/v1" {
+		t.Errorf("base_url phải được phân giải từ biến môi trường, nhận được %q", pc.BaseURL)
+	}
+	ref, ok := cfg.EnvRefs["providers.openrouter.api_key"]
+	if !ok || ref.raw != "env:TEST_AI_KEY" || ref.resolved != "sk-env-123456" {
+		t.Errorf("EnvRefs phải ghi chú tham chiếu api_key, nhận được %#v (ok=%v)", ref, ok)
+	}
+	// Giá trị chuỗi lồng trong extra/extra_body cũng được phân giải (khóa map không đổi)
+	headers, ok := pc.Extra["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("extra.headers thiếu hoặc sai kiểu: %#v", pc.Extra["headers"])
+	}
+	if got := headers["X-API-Key"]; got != "hdr-env-789" {
+		t.Errorf("extra.headers[X-API-Key] phải được phân giải từ biến môi trường, nhận được %#v", got)
+	}
+	if got := pc.ExtraBody["temperature"]; got != 0.8 {
+		t.Errorf("giá trị không phải chuỗi phải giữ nguyên, extra_body[temperature] = %#v", got)
+	}
+	if got := pc.ExtraBody["user_id"]; got != "user-env-42" {
+		t.Errorf("extra_body[user_id] phải được phân giải từ biến môi trường, nhận được %#v", got)
+	}
+	if _, ok := cfg.EnvRefs["providers.openrouter.extra.headers.X-API-Key"]; !ok {
+		t.Error("EnvRefs phải ghi chú tham chiếu trong extra.headers")
+	}
+	if _, ok := cfg.EnvRefs["providers.openrouter.extra_body.user_id"]; !ok {
+		t.Error("EnvRefs phải ghi chú tham chiếu trong extra_body")
+	}
+}
+
+// env: trỏ tới biến chưa đặt hoặc rỗng phải báo lỗi kèm tên biến — không được
+// âm thầm dùng giá trị rỗng (cùng nguyên tắc fail loud của issue #37).
+func TestLoadConfig_EnvRefUnsetFailsLoud(t *testing.T) {
+	writeGlobal(t, `{
+  "provider": "openrouter",
+  "model": "google/gemini-2.5-flash",
+  "providers": { "openrouter": { "api_key": "env:TEST_AI_KEY_NOT_SET" } }
+}`)
+	t.Setenv("TEST_AI_KEY_NOT_SET", "") // rỗng tương đương chưa đặt
+	proj := t.TempDir()
+	t.Chdir(proj)
+
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatal("biến môi trường rỗng phải báo lỗi, không được âm thầm dùng giá trị rỗng")
+	}
+	if !errors.Is(err, errs.ErrConfig) {
+		t.Errorf("phải bọc errs.ErrConfig, nhận được: %v", err)
+	}
+	if !contains(err.Error(), "TEST_AI_KEY_NOT_SET") {
+		t.Errorf("lỗi phải nêu tên biến để truy vết, nhận được: %v", err)
+	}
+}
+
+func TestLoadConfig_EnvRefEmptyNameFails(t *testing.T) {
+	writeGlobal(t, `{
+  "provider": "openrouter",
+  "model": "google/gemini-2.5-flash",
+  "providers": { "openrouter": { "api_key": "env:" } }
+}`)
+	proj := t.TempDir()
+	t.Chdir(proj)
+
+	if _, err := LoadConfig(""); err == nil {
+		t.Fatal("env: thiếu tên biến phải báo lỗi")
+	}
+}
+
+// env: chỉ được phân giải sau khi hợp nhất các cấp: cấp dự án ghi đè bằng giá trị cụ thể
+// thì thắng, kể cả khi tham chiếu env: của cấp toàn cục trỏ tới biến không tồn tại.
+func TestLoadConfig_EnvRefOverriddenByLiteral(t *testing.T) {
+	writeGlobal(t, `{
+  "provider": "openrouter",
+  "model": "google/gemini-2.5-flash",
+  "providers": { "openrouter": { "api_key": "env:TEST_AI_KEY_NOT_SET" } }
+}`)
+	proj := t.TempDir()
+	t.Chdir(proj)
+	writeProjectConfig(t, `{ "providers": { "openrouter": { "api_key": "sk-project-456" } } }`)
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("ghi đè bằng giá trị cụ thể phải qua được env-ref toàn cục lỗi: %v", err)
+	}
+	if got := cfg.Providers["openrouter"].APIKey; got != "sk-project-456" {
+		t.Errorf("api_key phải là giá trị cấp dự án, nhận được %q", got)
+	}
+}
+
+// SaveConfig phải khôi phục dạng "env:NAME" (không ghi bí mật đã phân giải ra đĩa),
+// giữ nguyên giá trị trường đã bị đổi từ lúc tải (ví dụ /model), và không làm đổi
+// cấu hình đang chạy của bên gọi.
+func TestSaveConfig_RestoresEnvRefs(t *testing.T) {
+	writeGlobal(t, `{
+  "provider": "openrouter",
+  "model": "google/gemini-2.5-flash",
+  "providers": {
+    "openrouter": {
+      "api_key": "env:TEST_AI_KEY",
+      "extra_body": { "user_id": "env:TEST_BODY_USER" },
+      "extra": { "headers": { "X-API-Key": "env:TEST_HEADER_KEY" } }
+    }
+  }
+}`)
+	t.Setenv("TEST_AI_KEY", "sk-env-123456")
+	t.Setenv("TEST_HEADER_KEY", "hdr-env-789")
+	t.Setenv("TEST_BODY_USER", "user-env-42")
+	proj := t.TempDir()
+	t.Chdir(proj)
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("tải cấu hình env: %v", err)
+	}
+	cfg.ModelName = "google/gemini-3.0-pro" // mô phỏng /model đổi model
+	path := filepath.Join(proj, "saved.json")
+	if err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("đọc file đã lưu: %v", err)
+	}
+	if !contains(string(data), `"api_key": "env:TEST_AI_KEY"`) {
+		t.Errorf("file đã lưu phải giữ dạng env: (không rò rỉ bí mật), nội dung: %s", data)
+	}
+	if !contains(string(data), `"X-API-Key": "env:TEST_HEADER_KEY"`) {
+		t.Errorf("file đã lưu phải giữ dạng env: cho extra.headers, nội dung: %s", data)
+	}
+	if !contains(string(data), `"user_id": "env:TEST_BODY_USER"`) {
+		t.Errorf("file đã lưu phải giữ dạng env: cho extra_body, nội dung: %s", data)
+	}
+	if !contains(string(data), `"model": "google/gemini-3.0-pro"`) {
+		t.Errorf("model mới phải được lưu nguyên vẹn, nội dung: %s", data)
+	}
+	if strings.Contains(string(data), "sk-env-123456") || strings.Contains(string(data), "hdr-env-789") || strings.Contains(string(data), "user-env-42") {
+		t.Errorf("bí mật đã phân giải không được ghi xuống đĩa: %s", data)
+	}
+	// Cấu hình đang chạy của bên gọi không được đổi
+	if got := cfg.Providers["openrouter"].APIKey; got != "sk-env-123456" {
+		t.Errorf("SaveConfig không được đổi api_key của cấu hình bên gọi, nhận được %q", got)
+	}
+	headers, ok := cfg.Providers["openrouter"].Extra["headers"].(map[string]any)
+	if !ok || headers["X-API-Key"] != "hdr-env-789" {
+		t.Errorf("SaveConfig không được đổi extra.headers của cấu hình bên gọi, nhận được %#v", cfg.Providers["openrouter"].Extra["headers"])
+	}
+	if _, ok := cfg.EnvRefs["providers.openrouter.api_key"]; !ok {
+		t.Error("SaveConfig không được xóa EnvRefs của cấu hình bên gọi")
+	}
+}
+
 func TestMergeConfig_ProviderExtraFields(t *testing.T) {
 	base := Config{
 		Provider:  "openrouter",
@@ -192,23 +373,23 @@ func TestValidateBase_ProviderOverrideWithoutCredentials(t *testing.T) {
 
 // File ví dụ nội trang (config.example.jsonc qua go:embed) phải tự nhất quán:
 // sau khi bỏ comment phải là JSON hợp lệ, con trỏ provider cấp cao nhất không được treo lơ lửng,
-// và phải giải thích rõ tư duy “con trỏ” — đây là mẫu người dùng sẽ chép, nếu chính nó lỗi sẽ gây hại.
+// và phải giải thích rõ tư duy "con trỏ" — đây là mẫu người dùng sẽ chép, nếu chính nó lỗi sẽ gây hại.
 func TestExampleConfigIsValidAndSelfConsistent(t *testing.T) {
-	if exampleConfig == “” {
-		t.Fatal(“go:embed chưa có hiệu lực, exampleConfig rỗng”)
+	if exampleConfig == "" {
+		t.Fatal("go:embed chưa có hiệu lực, exampleConfig rỗng")
 	}
 	var cfg Config
 	if err := json.Unmarshal(stripJSONComments([]byte(exampleConfig)), &cfg); err != nil {
-		t.Fatalf(“file ví dụ nội trang sau khi bỏ comment không phải JSON hợp lệ (người dùng chép là gặp họa): %v”, err)
+		t.Fatalf("file ví dụ nội trang sau khi bỏ comment không phải JSON hợp lệ (người dùng chép là gặp họa): %v", err)
 	}
-	if cfg.Provider == “” || cfg.ModelName == “” {
-		t.Fatal(“file ví dụ phải cung cấp provider/model mặc định”)
+	if cfg.Provider == "" || cfg.ModelName == "" {
+		t.Fatal("file ví dụ phải cung cấp provider/model mặc định")
 	}
 	if _, ok := cfg.Providers[cfg.Provider]; !ok {
-		t.Errorf(“provider cấp cao nhất %q trong ví dụ không trỏ đến mục trong providers — mẫu con trỏ chính nó bị treo lơ lửng”, cfg.Provider)
+		t.Errorf("provider cấp cao nhất %q trong ví dụ không trỏ đến mục trong providers — mẫu con trỏ chính nó bị treo lơ lửng", cfg.Provider)
 	}
-	if !contains(exampleConfig, “con trỏ”) {
-		t.Error(“file ví dụ phải giải thích rõ \”provider là con trỏ\” — tránh để bẫy nhận thức của #37 tái diễn”)
+	if !contains(exampleConfig, "con trỏ") {
+		t.Error("file ví dụ phải giải thích rõ \"provider là con trỏ\" — tránh để bẫy nhận thức của #37 tái diễn")
 	}
 }
 
