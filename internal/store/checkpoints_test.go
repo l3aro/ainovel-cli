@@ -215,6 +215,56 @@ func TestCheckpointIndexIdempotentAppend(t *testing.T) {
 	}
 }
 
+func TestCheckpointIndexScopeJunkFieldsDedupe(t *testing.T) {
+	cs, _ := newTestCheckpointStore(t)
+
+	// Chapter: Matches chỉ so sánh Chapter, Volume/Arc rác phải được zero hóa trong khóa.
+	cp1, err := cs.Append(domain.ChapterScope(1), "plan", "p", "sha256:junk")
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	junkChapter := domain.Scope{Kind: domain.ScopeChapter, Chapter: 1, Volume: 99, Arc: 99}
+	cp2, err := cs.Append(junkChapter, "plan", "p", "sha256:junk")
+	if err != nil {
+		t.Fatalf("append with junk chapter scope: %v", err)
+	}
+	if cp1.Seq != cp2.Seq {
+		t.Fatalf("junk Volume/Arc on chapter scope must dedupe: seq %d vs %d", cp1.Seq, cp2.Seq)
+	}
+
+	// Arc: Matches chỉ so sánh Volume+Arc, Chapter rác phải được zero hóa trong khóa.
+	cp3, err := cs.Append(domain.ArcScope(2, 3), "review", "r", "sha256:junk2")
+	if err != nil {
+		t.Fatalf("append arc: %v", err)
+	}
+	junkArc := domain.Scope{Kind: domain.ScopeArc, Volume: 2, Arc: 3, Chapter: 99}
+	cp4, err := cs.Append(junkArc, "review", "r", "sha256:junk2")
+	if err != nil {
+		t.Fatalf("append with junk arc scope: %v", err)
+	}
+	if cp3.Seq != cp4.Seq {
+		t.Fatalf("junk Chapter on arc scope must dedupe: seq %d vs %d", cp3.Seq, cp4.Seq)
+	}
+
+	// Volume: Matches chỉ so sánh Volume, Chapter+Arc rác phải được zero hóa trong khóa.
+	cp5, err := cs.Append(domain.VolumeScope(4), "volume_summary", "v", "sha256:junk3")
+	if err != nil {
+		t.Fatalf("append volume: %v", err)
+	}
+	junkVolume := domain.Scope{Kind: domain.ScopeVolume, Volume: 4, Chapter: 99, Arc: 99}
+	cp6, err := cs.Append(junkVolume, "volume_summary", "v", "sha256:junk3")
+	if err != nil {
+		t.Fatalf("append with junk volume scope: %v", err)
+	}
+	if cp5.Seq != cp6.Seq {
+		t.Fatalf("junk Chapter/Arc on volume scope must dedupe: seq %d vs %d", cp5.Seq, cp6.Seq)
+	}
+
+	if all := cs.All(); len(all) != 3 {
+		t.Fatalf("no duplicates expected, want 3 got %d", len(all))
+	}
+}
+
 func TestCheckpointStore_AllReturnsCopy(t *testing.T) {
 	cs, _ := newTestCheckpointStore(t)
 	cs.Append(domain.ChapterScope(1), "plan", "p", "sha256:1")

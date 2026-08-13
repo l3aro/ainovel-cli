@@ -35,17 +35,24 @@ type checkpointKey struct {
 	digest string
 }
 
-// normalizeScope chuẩn hóa Scope về dạng khóa theo đúng ngữ nghĩa của Scope.Matches:
-// với loại không phải chapter/arc/volume (vd. global), Matches bỏ qua mọi trường số,
-// nên khóa cũng phải bỏ qua chúng để giữ nguyên hành vi idempotent cũ.
+// normalizeScope chuẩn hóa Scope về dạng khóa sao cho bằng nhau theo == đúng khi và chỉ khi
+// Scope.Matches trả về true: mỗi loại chỉ giữ các trường mà Matches so sánh và zero hóa
+// phần còn lại (chapter: Chapter; arc: Volume+Arc; volume: Volume; loại khác: tất cả).
+// Nếu không zero hóa, scope lưu trên đĩa có trường rác trong phần bị bỏ qua
+// (vd. {kind:chapter, volume:5}) sẽ không khớp khóa với {kind:chapter} dù Matches khớp,
+// gây ghi trùng điểm khôi phục.
 func normalizeScope(s domain.Scope) domain.Scope {
 	switch s.Kind {
-	case domain.ScopeChapter, domain.ScopeArc, domain.ScopeVolume:
-		return s
+	case domain.ScopeChapter:
+		s.Volume, s.Arc = 0, 0
+	case domain.ScopeArc:
+		s.Chapter = 0
+	case domain.ScopeVolume:
+		s.Chapter, s.Arc = 0, 0
 	default:
 		s.Chapter, s.Volume, s.Arc = 0, 0, 0
-		return s
 	}
+	return s
 }
 
 func checkpointKeyFor(cp domain.Checkpoint) checkpointKey {
