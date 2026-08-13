@@ -134,6 +134,87 @@ func TestCheckpointStore_RestoreFromDisk(t *testing.T) {
 	}
 }
 
+func TestCheckpointIndexRestoredFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	io1 := newIO(dir)
+	cs1 := NewCheckpointStore(io1)
+	if _, err := cs1.Append(domain.ChapterScope(3), "plan", "p", "sha256:rebuild"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	// Instance mới tải từ đĩa: digestIdx phải được dựng lại từ cache trong loadFromDisk,
+	// nên tra cứu idempotent vẫn hoạt động mà không cần quét lại.
+	io2 := newIO(dir)
+	cs2 := NewCheckpointStore(io2)
+
+	dup, err := cs2.Append(domain.ChapterScope(3), "plan", "p", "sha256:rebuild")
+	if err != nil {
+		t.Fatalf("re-append on fresh store: %v", err)
+	}
+	if dup.Seq != 1 {
+		t.Fatalf("idempotent across restart want seq 1 got %d", dup.Seq)
+	}
+	if all := cs2.All(); len(all) != 1 {
+		t.Fatalf("no duplicate across restart, want 1 got %d", len(all))
+	}
+}
+
+func TestCheckpointIndexResetCleared(t *testing.T) {
+	cs, _ := newTestCheckpointStore(t)
+
+	cp1, err := cs.Append(domain.ChapterScope(1), "plan", "p", "sha256:1")
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	if err := cs.Reset(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+
+	// Sau Reset, thêm lại cùng khóa phải tạo bản ghi mới (seq bắt đầu từ 1),
+	// không được trả về bản ghi cũ qua chỉ mục còn sót lại.
+	cp2, err := cs.Append(domain.ChapterScope(1), "plan", "p", "sha256:1")
+	if err != nil {
+		t.Fatalf("append after reset: %v", err)
+	}
+	if cp2.Seq != 1 {
+		t.Fatalf("seq after reset want 1 got %d", cp2.Seq)
+	}
+	if cp2 == cp1 {
+		t.Fatalf("reset should drop index: got the pre-reset entry back")
+	}
+
+	// Chỉ mục phải được dựng lại cho cache mới: lần thêm thứ ba trùng khóa là idempotent.
+	cp3, _ := cs.Append(domain.ChapterScope(1), "plan", "p", "sha256:1")
+	if cp3.Seq != cp2.Seq {
+		t.Fatalf("idempotent after reset: want seq %d got %d", cp2.Seq, cp3.Seq)
+	}
+	if all := cs.All(); len(all) != 1 {
+		t.Fatalf("cache should hold 1 entry after reset, got %d", len(all))
+	}
+}
+
+func TestCheckpointIndexIdempotentAppend(t *testing.T) {
+	cs, _ := newTestCheckpointStore(t)
+
+	cp1, err := cs.Append(domain.ChapterScope(1), "plan", "p", "sha256:abc")
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	// Lần thứ hai cùng scope+step+digest phải trả về bản ghi hiện có qua digestIdx,
+	// không được ghi thêm bản ghi mới.
+	cp2, err := cs.Append(domain.ChapterScope(1), "plan", "p", "sha256:abc")
+	if err != nil {
+		t.Fatalf("re-append: %v", err)
+	}
+	if cp1.Seq != cp2.Seq {
+		t.Fatalf("second append must return existing entry, seq %d vs %d", cp1.Seq, cp2.Seq)
+	}
+	if all := cs.All(); len(all) != 1 {
+		t.Fatalf("cache must not grow on idempotent append, want 1 got %d", len(all))
+	}
+}
+
 func TestCheckpointStore_AllReturnsCopy(t *testing.T) {
 	cs, _ := newTestCheckpointStore(t)
 	cs.Append(domain.ChapterScope(1), "plan", "p", "sha256:1")

@@ -20,9 +20,36 @@ const checkpointsFile = "meta/checkpoints.jsonl"
 // Bất biến: cache là bản sao của checkpoints.jsonl, được duy trì tập trung bởi Append/Reset.
 // Đồng thời: cache được bảo vệ bởi io.mu, ghi dùng Lock, đọc dùng RLock.
 type CheckpointStore struct {
-	io     *IO
-	seqGen atomic.Int64
-	cache  []domain.Checkpoint
+	io        *IO
+	seqGen    atomic.Int64
+	cache     []domain.Checkpoint
+	digestIdx map[checkpointKey]int
+}
+
+// checkpointKey định danh duy nhất (scope, step, digest) để tra cứu idempotent O(1).
+// Scope là struct tương đương (so sánh được bằng ==) nên dùng struct làm khóa.
+// Giá trị là chỉ mục tương ứng trong cache.
+type checkpointKey struct {
+	scope  domain.Scope
+	step   string
+	digest string
+}
+
+// normalizeScope chuẩn hóa Scope về dạng khóa theo đúng ngữ nghĩa của Scope.Matches:
+// với loại không phải chapter/arc/volume (vd. global), Matches bỏ qua mọi trường số,
+// nên khóa cũng phải bỏ qua chúng để giữ nguyên hành vi idempotent cũ.
+func normalizeScope(s domain.Scope) domain.Scope {
+	switch s.Kind {
+	case domain.ScopeChapter, domain.ScopeArc, domain.ScopeVolume:
+		return s
+	default:
+		s.Chapter, s.Volume, s.Arc = 0, 0, 0
+		return s
+	}
+}
+
+func checkpointKeyFor(cp domain.Checkpoint) checkpointKey {
+	return checkpointKey{scope: normalizeScope(cp.Scope), step: cp.Step, digest: cp.Digest}
 }
 
 // NewCheckpointStore tạo kho lưu trữ điểm khôi phục, tải toàn bộ điểm khôi phục hiện có từ đĩa vào cache một lần.
@@ -45,6 +72,20 @@ func (cs *CheckpointStore) loadFromDisk() {
 		}
 	}
 	cs.seqGen.Store(maxSeq)
+	cs.rebuildDigestIndexLocked()
+}
+
+// rebuildDigestIndexLocked xây lại digestIdx từ cache. Chỉ gọi khi đang giữ io.mu (Lock ghi).
+// Nếu cache có nhiều bản ghi trùng khóa, bản sau (mới nhất) thắng — khớp với
+// quét ngược từ cuối của hành vi cũ.
+func (cs *CheckpointStore) rebuildDigestIndexLocked() {
+	cs.digestIdx = make(map[checkpointKey]int, len(cs.cache))
+	for i, cp := range cs.cache {
+		if cp.Digest == "" {
+			continue
+		}
+		cs.digestIdx[checkpointKeyFor(cp)] = i
+	}
 }
 
 // Append ghi thêm một điểm khôi phục.
@@ -54,11 +95,9 @@ func (cs *CheckpointStore) Append(scope domain.Scope, step, artifact, digest str
 	defer cs.io.mu.Unlock()
 
 	if digest != "" {
-		for i := len(cs.cache) - 1; i >= 0; i-- {
-			cp := cs.cache[i]
-			if cp.Scope.Matches(scope) && cp.Step == step && cp.Digest == digest {
-				return &cp, nil
-			}
+		if idx, ok := cs.digestIdx[checkpointKey{scope: normalizeScope(scope), step: step, digest: digest}]; ok {
+			cp := cs.cache[idx]
+			return &cp, nil
 		}
 	}
 
@@ -84,6 +123,9 @@ func (cs *CheckpointStore) Append(scope domain.Scope, step, artifact, digest str
 	}
 	cs.seqGen.Store(seq)
 	cs.cache = append(cs.cache, cp)
+	if digest != "" {
+		cs.digestIdx[checkpointKeyFor(cp)] = len(cs.cache) - 1
+	}
 	return &cp, nil
 }
 
@@ -159,6 +201,8 @@ func (cs *CheckpointStore) Reset() error {
 	}
 	cs.seqGen.Store(0)
 	cs.cache = nil
+	// Khởi tạo lại map rỗng (không để nil) vì Append sau Reset sẽ ghi vào digestIdx.
+	cs.digestIdx = make(map[checkpointKey]int)
 	return nil
 }
 
