@@ -636,12 +636,13 @@ func (h *Host) Snapshot() UISnapshot {
 			snap.CurrentVolumeArc = fmt.Sprintf("Tập %d·Cung %d", progress.CurrentVolume, progress.CurrentArc)
 		}
 	}
-	if snap.NovelName == "" {
-		if premise, _ := h.store.Outline.LoadPremise(); premise != "" {
-			snap.NovelName = domain.ExtractNovelNameFromPremise(premise)
-		}
+	// Nạp premise một lần duy nhất: dùng cho trích xuất tên sách (khi NovelName rỗng) và truyền vào fillDetails.
+	premise, _ := h.store.Outline.LoadPremise()
+	if snap.NovelName == "" && premise != "" {
+		snap.NovelName = domain.ExtractNovelNameFromPremise(premise)
 	}
-	if meta, _ := h.store.RunMeta.Load(); meta != nil {
+	meta, _ := h.store.RunMeta.Load()
+	if meta != nil {
 		snap.PendingSteer = meta.PendingSteer
 	}
 
@@ -649,12 +650,12 @@ func (h *Host) Snapshot() UISnapshot {
 	h.fillContextStatus(&snap)
 	snap.StatusLabel = deriveStatusLabel(snap)
 
-	// Nhãn khôi phục
-	if _, label, err := buildResumePrompt(h.store); err == nil && label != "" {
+	// Nhãn khôi phục — truyền progress/meta đã nạp ở trên, tránh đọc lại cùng file trong cùng lần gọi.
+	if _, label, err := buildResumePromptFrom(h.store, progress, meta); err == nil && label != "" {
 		snap.RecoveryLabel = label
 	}
 
-	h.fillDetails(&snap, progress)
+	h.fillDetails(&snap, progress, premise)
 
 	return snap
 }
@@ -691,8 +692,8 @@ func (h *Host) fillContextStatus(snap *UISnapshot) {
 }
 
 // fillDetails điền khu vực chi tiết: thiết lập, nhân vật, commit/review/tóm tắt gần đây.
-func (h *Host) fillDetails(snap *UISnapshot, progress *domain.Progress) {
-	if premise, _ := h.store.Outline.LoadPremise(); premise != "" {
+func (h *Host) fillDetails(snap *UISnapshot, progress *domain.Progress, premise string) {
+	if premise != "" {
 		snap.Premise = truncate(premise, 80)
 	}
 	if outline, _ := h.store.Outline.LoadOutline(); len(outline) > 0 {

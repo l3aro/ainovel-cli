@@ -19,9 +19,19 @@ import (
 //
 // Trả về (prompt, label, error). label rỗng nghĩa là không có trạng thái có thể khôi phục (nên tạo mới).
 func buildResumePrompt(store *storepkg.Store) (string, string, error) {
-	progress, err := store.Progress.Load()
-	if err != nil && !os.IsNotExist(err) {
-		return "", "", err
+	return buildResumePromptFrom(store, nil, nil)
+}
+
+// buildResumePromptFrom là biến thể của buildResumePrompt nhận sẵn progress/meta đã nạp
+// (Snapshot nạp một lần rồi truyền vào, tránh đọc lặp cùng file trong một lần gọi).
+// Nil-safe: nếu progress hoặc meta là nil thì tự nạp lại từ store, giữ nguyên hành vi cũ.
+func buildResumePromptFrom(store *storepkg.Store, progress *domain.Progress, meta *domain.RunMeta) (string, string, error) {
+	if progress == nil {
+		p, err := store.Progress.Load()
+		if err != nil && !os.IsNotExist(err) {
+			return "", "", err
+		}
+		progress = p
 	}
 	if progress == nil || progress.Phase == domain.PhaseComplete {
 		return "", "", nil
@@ -45,7 +55,10 @@ func buildResumePrompt(store *storepkg.Store) (string, string, error) {
 	b.WriteString("。\n")
 	b.WriteString("Host sẽ căn cứ thực tế hiện tại để gửi thông điệp `[Host ra lệnh]` bước tiếp theo. Nhận được thì thực thi ngay, không gọi novel_context suy luận trước.\n")
 
-	if meta, _ := store.RunMeta.Load(); meta != nil && meta.PendingSteer != "" {
+	if meta == nil {
+		meta, _ = store.RunMeta.Load()
+	}
+	if meta != nil && meta.PendingSteer != "" {
 		b.WriteString("\nNgười dùng đã để lại một ý kiến can thiệp trong thời gian tạm dừng:\n「")
 		b.WriteString(meta.PendingSteer)
 		b.WriteString("」\nVui lòng đánh giá và xử lý theo quy tắc can thiệp người dùng trong coordinator.md trước.")
