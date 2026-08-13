@@ -87,6 +87,19 @@ func commandRegistryInstance() commandRegistry {
 			},
 		},
 		{
+			Name:        "novels",
+			Group:       "system",
+			Usage:       "/novels",
+			Description: "Quay về thư viện để chuyển tiểu thuyết",
+			NeedsIdle:   true,
+			Run: func(m Model, _ []string) (tea.Model, tea.Cmd) {
+				// Không đóng Host: runWorkspace đóng Host (defer rt.Close) sau khi
+				// chương trình kết thúc; chỉ đặt cờ để runSelectionLoop mở lại kho.
+				m.openLibrary = true
+				return m, tea.Quit
+			},
+		},
+		{
 			Name:        "diag",
 			Group:       "analysis",
 			Usage:       "/diag",

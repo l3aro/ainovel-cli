@@ -62,8 +62,7 @@ type Model struct {
 	report      *reportState
 	version     string
 	// openLibrary: phiên kết thúc với yêu cầu quay lại màn hình chọn truyện (mở kho lần nữa).
-	// Bước 3 sẽ có đường đặt cờ này (lệnh /novels) trước khi Quit; bước 2 chưa có đường đặt,
-	// luôn false → Ctrl+C bình thường thoát Run.
+	// Lệnh /novels đặt cờ này trước khi Quit; nếu không đặt (Ctrl+C bình thường) → thoát Run.
 	openLibrary bool
 	importer    *importState
 	importSeq   int
