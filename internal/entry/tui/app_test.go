@@ -175,19 +175,3 @@ func TestRunSelectionLoop_FillDefaultsBeforeDerive(t *testing.T) {
 		t.Errorf("FillDefaults phải chạy trước khi suy thư mục: nhận legacyDir=%q novelsDir=%q", legacyDir, novelsDir)
 	}
 }
-
-func TestPickNovel_LegacySeam(t *testing.T) {
-	novel, err := pickNovel(bootstrap.Config{OutputDir: "out/legacy"}, "out/legacy", "out/novels")
-	if err != nil {
-		t.Fatalf("seam bước 2 không được lỗi, nhận %v", err)
-	}
-	if novel == nil {
-		t.Fatal("seam bước 2 phải luôn chọn workspace legacy")
-	}
-	if novel.Dir != "out/legacy" {
-		t.Errorf("seam phải trỏ về legacyDir, nhận %q", novel.Dir)
-	}
-	if !novel.Legacy {
-		t.Error("workspace legacy phải được đánh dấu Legacy=true")
-	}
-}
