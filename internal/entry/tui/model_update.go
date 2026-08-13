@@ -21,6 +21,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewportSize()
 		m.refreshDetailViewport()
 		m.refreshStateViewport()
+		if m.fullscreen {
+			// Resize khi đang toàn màn hình: viewport của view phóng to theo kích thước mới,
+			// nội dung render lại đúng bề rộng mới.
+			m.fitFullscreenViewport()
+			m.refreshFocusedPane()
+		}
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKeyMsg(msg)
@@ -168,6 +174,15 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Type {
 	case tea.KeyEscape:
+		// Toàn màn hình: Esc thoát toàn màn hình trước (giữ focus ở view); Esc lần nữa về ô nhập.
+		if m.fullscreen {
+			m.toggleFullscreen()
+			return m, nil
+		}
+		// Panel đang giữ tiêu điểm: Esc đưa tiêu điểm về ô nhập trước, không hủy input / không tạm dừng.
+		if !m.focusInput {
+			return m, m.focusInputArea()
+		}
 		if m.mode == modeRunning && m.snapshot.IsRunning {
 			return m, abortRuntime(m.runtime)
 		}
@@ -181,6 +196,9 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.resetOutputPanels()
 		return m, nil
 	case tea.KeyCtrlU:
+		if !m.focusInput {
+			return m, nil
+		}
 		// Xóa nội dung nhập hiện tại; đồng thời thoát khỏi chế độ duyệt lịch sử.
 		m.textarea.Reset()
 		m.historyIdx = len(m.inputHistory)
@@ -203,9 +221,49 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.textarea.Placeholder = placeholderForNewMode(m.startupMode)
 			return m, nil
 		}
-		m.focusPane = (m.focusPane + 1) % focusPaneCount
+		// Toàn màn hình: Tab xoay vòng giữa các view, giữ nguyên chế độ toàn màn hình (không về ô nhập).
+		if m.fullscreen {
+			if m.focusInput {
+				m.focusViewPane(m.focusPane) // ô nhập vừa được nhấp chuột: quay về view đang phóng to
+			} else {
+				m.focusViewPane((m.focusPane + 1) % focusPaneCount)
+			}
+			return m, nil
+		}
+		// Vòng tiêu điểm: ô nhập → luồng sự kiện → đầu ra → chi tiết → trạng thái → ô nhập.
+		if m.focusInput {
+			m.focusViewPane(focusEvents)
+		} else if m.focusPane == focusState {
+			return m, m.focusInputArea()
+		} else {
+			m.focusViewPane(m.focusPane + 1)
+		}
+		return m, nil
+	case tea.KeyShiftTab:
+		if m.mode == modeNew {
+			return m, nil
+		}
+		if m.fullscreen {
+			if m.focusInput {
+				m.focusViewPane(m.focusPane)
+			} else {
+				m.focusViewPane((m.focusPane - 1 + focusPaneCount) % focusPaneCount)
+			}
+			return m, nil
+		}
+		if m.focusInput {
+			m.focusViewPane(focusState)
+		} else if m.focusPane == focusEvents {
+			return m, m.focusInputArea()
+		} else {
+			m.focusViewPane(m.focusPane - 1)
+		}
 		return m, nil
 	case tea.KeyEnter:
+		// Panel giữ tiêu điểm: Enter không submit.
+		if !m.focusInput {
+			return m, nil
+		}
 		// Alt+Enter là xuống dòng chủ động, để textarea.Update xử lý (KeyMap.InsertNewline đã bind vào phím này).
 		if msg.Alt {
 			break
@@ -221,6 +279,10 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleEnterKey()
 	case tea.KeyUp:
+		// Panel giữ tiêu điểm: ↑↓ cuộn panel đó.
+		if !m.focusInput {
+			return m.handleVerticalScrollKey(msg, true)
+		}
 		// Nhập nhiều dòng: để textarea xử lý di chuyển con trỏ trong dòng (rơi vào textarea.Update sau switch)
 		if m.textareaIsMultiline() {
 			break
@@ -231,6 +293,9 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleVerticalScrollKey(msg, true)
 	case tea.KeyDown:
+		if !m.focusInput {
+			return m.handleVerticalScrollKey(msg, false)
+		}
 		if m.textareaIsMultiline() {
 			break
 		}
@@ -242,6 +307,23 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleVerticalScrollKey(msg, true)
 	case tea.KeyPgDown:
 		return m.handleVerticalScrollKey(msg, false)
+	case tea.KeyHome:
+		// Panel giữ tiêu điểm: Home nhảy về đầu panel đó; ô nhập giữ focus thì Home về đầu dòng (textarea).
+		if !m.focusInput {
+			switch m.focusPane {
+			case focusStream:
+				m.streamScroll = false
+				m.streamVP.GotoTop()
+			case focusDetail:
+				m.detailVP.GotoTop()
+			case focusState:
+				m.stateVP.GotoTop()
+			default:
+				m.autoScroll = false
+				m.viewport.GotoTop()
+			}
+			return m, nil
+		}
 	case tea.KeyEnd:
 		switch m.focusPane {
 		case focusStream:
@@ -255,6 +337,18 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.autoScroll = true
 			m.viewport.GotoBottom()
 		}
+		return m, nil
+	}
+
+	// f: bật/tắt toàn màn hình cho view đang giữ tiêu điểm (f/F đều được);
+	// ô nhập giữ focus thì f vẫn là ký tự gõ bình thường.
+	if !m.focusInput && msg.Type == tea.KeyRunes && (string(msg.Runes) == "f" || string(msg.Runes) == "F") {
+		m.toggleFullscreen()
+		return m, nil
+	}
+
+	// Tiêu điểm đang ở panel: mọi phím còn lại (ký tự, xóa, tổ hợp Ctrl...) không được vào ô nhập.
+	if !m.focusInput {
 		return m, nil
 	}
 
@@ -380,14 +474,51 @@ func (m Model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.modelSwitch != nil || m.askState != nil {
 		return m, nil
 	}
+	if m.fullscreen {
+		// Toàn màn hình: bánh xe cuộn view đang phóng to bất kể vị trí hover;
+		// nhấp vào vùng ô nhập đưa focus về ô nhập; đổi view bằng Tab.
+		var cmd tea.Cmd
+		switch m.focusPane {
+		case focusStream:
+			m.streamVP, cmd = m.streamVP.Update(msg)
+			if msg.Action == tea.MouseActionPress {
+				m.streamScroll = m.streamVP.AtBottom()
+			}
+		case focusDetail:
+			m.detailVP, cmd = m.detailVP.Update(msg)
+		case focusState:
+			m.stateVP, cmd = m.stateVP.Update(msg)
+		default:
+			m.viewport, cmd = m.viewport.Update(msg)
+			if msg.Action == tea.MouseActionPress {
+				m.autoScroll = m.viewport.AtBottom()
+			}
+		}
+		if msg.Action == tea.MouseActionPress {
+			topH, _, bodyH := m.layoutHeights()
+			if msg.Y >= topH+bodyH {
+				return m, m.focusInputArea()
+			}
+		}
+		return m, cmd
+	}
 	if pane, ok := m.paneAtMouse(msg.X, msg.Y); ok {
 		m.hoverPane = pane
 		m.hoverActive = true
 		if msg.Action == tea.MouseActionPress {
-			m.focusPane = pane
+			// Nhấp vào panel: panel giữ tiêu điểm (ký tự gõ không vào ô nhập nữa).
+			m.focusViewPane(pane)
 		}
 	} else {
 		m.hoverActive = false
+		// Nhấp vào vùng ô nhập (bên dưới phần thân): đưa tiêu điểm về ô nhập và dừng —
+		// không chuyển tiếp cú nhấp xuống viewport phía dưới.
+		if msg.Action == tea.MouseActionPress {
+			topH, _, bodyH := m.layoutHeights()
+			if msg.Y >= topH+bodyH {
+				return m, m.focusInputArea()
+			}
+		}
 	}
 
 	var cmd tea.Cmd
@@ -464,7 +595,7 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			// Điều phối viên định tuyến đến reopen_book), các lệnh /export, /model
 			// cũng cần dùng được, ô nhập phải giữ focus (issue #27, #38).
 			m.textarea.Placeholder = "Sáng tác đã hoàn thành · Có thể nhập yêu cầu làm lại (vd: \"Viết lại chương 3\"), /export để xuất truyện, hoặc nhập / để xem lệnh"
-			return m, tea.Batch(fetchSnapshot(m.runtime), listenDone(m.runtime), m.textarea.Focus()), true
+			return m, tea.Batch(fetchSnapshot(m.runtime), listenDone(m.runtime), m.focusInputArea()), true
 		}
 		if m.abortPending {
 			m.abortPending = false
@@ -546,11 +677,11 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 				Time: time.Now(), Category: "ERROR", Summary: msg.err.Error(), Level: "error",
 			})
 			m.refreshEventViewport()
-			return m, tea.Batch(fetchSnapshot(m.runtime), m.textarea.Focus()), true
+			return m, tea.Batch(fetchSnapshot(m.runtime), m.focusInputArea()), true
 		}
 		m.err = nil
 		m.textarea.Placeholder = defaultSteerPlaceholder()
-		return m, tea.Batch(fetchSnapshot(m.runtime), listenDone(m.runtime), m.textarea.Focus()), true
+		return m, tea.Batch(fetchSnapshot(m.runtime), listenDone(m.runtime), m.focusInputArea()), true
 	case spinnerTickMsg:
 		m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
 		if m.snapshot.IsRunning {
@@ -625,11 +756,11 @@ func (m Model) handleStartResultMsg(msg startResultMsg) (tea.Model, tea.Cmd) {
 		if m.cocreate != nil {
 			m.cocreate.awaiting = false
 			m.textarea.Placeholder = placeholderForCoCreate(m.cocreate)
-			return m, tea.Batch(fetchSnapshot(m.runtime), m.textarea.Focus())
+			return m, tea.Batch(fetchSnapshot(m.runtime), m.focusInputArea())
 		}
 		if m.mode == modeNew {
 			m.textarea.Placeholder = placeholderForNewMode(m.startupMode)
-			return m, tea.Batch(fetchSnapshot(m.runtime), m.textarea.Focus())
+			return m, tea.Batch(fetchSnapshot(m.runtime), m.focusInputArea())
 		}
 		return m, fetchSnapshot(m.runtime)
 	}
@@ -639,7 +770,7 @@ func (m Model) handleStartResultMsg(msg startResultMsg) (tea.Model, tea.Cmd) {
 		enableMouse := m.enterRunning()
 		m.resizeTextarea()
 		m.textarea.Placeholder = defaultSteerPlaceholder()
-		return m, tea.Batch(fetchSnapshot(m.runtime), m.textarea.Focus(), enableMouse)
+		return m, tea.Batch(fetchSnapshot(m.runtime), m.focusInputArea(), enableMouse)
 	}
 
 	return m, fetchSnapshot(m.runtime)
@@ -653,12 +784,12 @@ func (m Model) handleCoCreateDoneMsg(msg cocreateDoneMsg) (tea.Model, tea.Cmd) {
 		m.err = msg.err
 		m.cocreate.awaiting = false
 		m.textarea.Placeholder = placeholderForCoCreate(m.cocreate)
-		return m, m.textarea.Focus()
+		return m, m.focusInputArea()
 	}
 	m.err = nil
 	m.cocreate.apply(msg.reply)
 	m.textarea.Placeholder = placeholderForCoCreate(m.cocreate)
-	return m, m.textarea.Focus()
+	return m, m.focusInputArea()
 }
 
 func (m Model) handleTextareaMsg(msg tea.Msg) (tea.Model, tea.Cmd) {

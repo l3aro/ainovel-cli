@@ -121,6 +121,7 @@ func TestStreamRoundMaterialization(t *testing.T) {
 func TestEventViewportCacheSpinnerOnlyRunningLines(t *testing.T) {
 	now := time.Now()
 	m := &Model{viewport: viewport.New(80, 10), eventIndex: make(map[string]int)}
+	m.updateViewportSize() // refresh lấy chiều rộng render từ viewport thực tế
 	// 2 dòng đang chạy (DISPATCH + TOOL lồng nhau) + 2 dòng hoàn thành
 	m.applyEvent(host.Event{ID: "d1", Time: now, Category: "DISPATCH", Agent: "coordinator", Summary: "writer（Viết chương 3）", Level: "info"})
 	m.applyEvent(host.Event{ID: "t1", Time: now.Add(100 * time.Millisecond), Category: "TOOL", Agent: "writer", Summary: "draft_chapter", Level: "info", Depth: 1})
@@ -170,6 +171,7 @@ func TestEventViewportCacheSpinnerOnlyRunningLines(t *testing.T) {
 func TestEventViewportCacheInvalidation(t *testing.T) {
 	now := time.Now()
 	m := &Model{viewport: viewport.New(80, 10), width: 200, eventIndex: make(map[string]int)} // eventFlowWidth = 100
+	m.updateViewportSize() // ứng dụng gọi updateViewportSize khi resize; refresh lấy chiều rộng từ viewport
 	centerW := m.eventFlowWidth()
 	if centerW != 100 {
 		t.Fatalf("eventFlowWidth = %d, want 100", centerW)
@@ -200,6 +202,7 @@ func TestEventViewportCacheInvalidation(t *testing.T) {
 
 	// Đổi chiều rộng cửa sổ: cache phải xây lại toàn bộ theo chiều rộng mới
 	m.width = 100 // eventFlowWidth = 50
+	m.updateViewportSize()
 	newW := m.eventFlowWidth()
 	if newW != 50 {
 		t.Fatalf("eventFlowWidth = %d, want 50", newW)

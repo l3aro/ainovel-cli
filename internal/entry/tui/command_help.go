@@ -55,6 +55,8 @@ func renderHelpText(width int) string {
 		"Nhập / để tìm kiếm lệnh",
 		"↑↓ chọn lệnh gợi ý",
 		"Tab/Enter chấp nhận gợi ý tự động hoàn thành",
+		"Tab chuyển focus ô nhập ↔ panel (Shift+Tab ngược) · Esc về ô nhập",
+		"f phóng to view đang focus · ở toàn màn hình Tab đổi view · f/Esc thoát",
 		"Esc đóng bảng lệnh hiện tại",
 		"Ctrl+R bật/tắt chế độ chọn sao chép (tắt báo chuột để kéo chọn sao chép, nhấn lần nữa để khôi phục)",
 	} {

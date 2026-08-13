@@ -11,7 +11,7 @@ import (
 
 // renderInputBox vẽ vùng nhập liệu ở phía dưới màn hình.
 // Ô nhập chỉ chịu trách nhiệm nhập liệu và hiển thị gợi ý, không chứa thanh chế độ khởi động.
-func renderInputBox(inputView, hints string, snap host.UISnapshot, outputDir string, width int) string {
+func renderInputBox(inputView, hints string, snap host.UISnapshot, outputDir string, width int, focused bool) string {
 	innerW := width - 4 // border + padding
 	if innerW < 12 {
 		innerW = 12
@@ -26,10 +26,15 @@ func renderInputBox(inputView, hints string, snap host.UISnapshot, outputDir str
 	line2 := joinInlineSides(hints, info, innerW)
 
 	// Vùng nhập (một hộp duy nhất, tránh hiển thị hai ô nhập về mặt trực quan)
+	// Viền ô nhập phản ánh tiêu điểm: màu nhấn khi ô nhập giữ focus, màu mờ khi focus ở panel.
+	borderColor := colorDim
+	if focused {
+		borderColor = colorAccent
+	}
 	inputStyle := lipgloss.NewStyle().
 		Width(width).
 		Border(baseBorder, true, false, true, false).
-		BorderForeground(colorDim).
+		BorderForeground(borderColor).
 		Padding(0, 1)
 	inputBlock := inputStyle.Render(inputLine)
 

@@ -73,7 +73,7 @@ type Model struct {
 	eventIndex  map[string]int // event.ID → chỉ số m.events; cập nhật tại chỗ khi sự kiện gọi đến
 	// Bộ đệm render luồng sự kiện: tránh render lại toàn bộ 500 dòng mỗi tick spinner (150ms/350ms).
 	// eventLines[i] là dòng đã render của m.events[i]; cache chỉ hợp lệ khi eventRenderWidth khớp
-	// eventFlowWidth() hiện tại. Tick spinner chỉ render lại các dòng đang chạy (khung thay đổi),
+	// chiều rộng render hiện tại (viewport.Width+2). Tick spinner chỉ render lại các dòng đang chạy (khung thay đổi),
 	// dòng hoàn thành giữ nguyên byte-for-byte; sự kiện mới được nối tiếp từ eventsCacheLen.
 	eventLines       []string // dòng đã render theo chỉ số m.events
 	eventRenderWidth int      // chiều rộng đã dùng để render eventLines; 0 = chưa từng render
@@ -100,6 +100,8 @@ type Model struct {
 	historyIdx      int       // chỉ số duyệt hiện tại; == len(inputHistory) nghĩa là "chưa duyệt, đang chỉnh sửa bản nháp"
 	historyDraft    string    // bản nháp lưu trước khi vào chế độ duyệt lịch sử, khôi phục khi về cuối
 	focusPane       focusPane
+	focusInput      bool // true: tiêu điểm ở ô nhập (mặc định); false: tiêu điểm ở panel focusPane, ký tự gõ không vào ô nhập
+	fullscreen      bool // true: view focusPane chiếm toàn bộ phần thân; Tab đổi view nhưng giữ toàn màn hình
 	hoverPane       focusPane
 	hoverActive     bool
 	mode            appMode
@@ -152,6 +154,7 @@ func NewModel(rt *host.Host, bridge *askUserBridge, version string) Model {
 		streamScroll: true,
 		mode:         modeNew,
 		startupMode:  startupModeQuick,
+		focusInput:   true,
 		textarea:     ta,
 		viewport:     vp,
 		streamVP:     svp,
@@ -214,10 +217,88 @@ func (m *Model) paneAtMouse(x, y int) (focusPane, bool) {
 }
 
 func (m *Model) paneHighlighted(pane focusPane) bool {
-	if m.focusPane == pane {
+	if !m.focusInput && m.focusPane == pane {
 		return true
 	}
 	return m.hoverActive && m.hoverPane == pane
+}
+
+// focusPaneLabel trả về nhãn hiển thị của panel, dùng trong gợi ý phím tắt khi panel giữ tiêu điểm.
+func focusPaneLabel(pane focusPane) string {
+	switch pane {
+	case focusStream:
+		return "đầu ra trực tiếp"
+	case focusDetail:
+		return "chi tiết"
+	case focusState:
+		return "trạng thái"
+	default:
+		return "luồng sự kiện"
+	}
+}
+
+// focusInputArea đưa tiêu điểm về ô nhập. Mọi đường chuyển focus về input đi qua đây để giữ bất biến
+// focusInput == (textarea đang nhận phím). Trả về cmd của textarea.Focus để caller batch vào kết quả.
+func (m *Model) focusInputArea() tea.Cmd {
+	m.focusInput = true
+	return m.textarea.Focus()
+}
+
+// focusViewPane chuyển tiêu điểm sang một panel: bàn phím cuộn panel đó, ký tự gõ không vào ô nhập
+// (textarea.Blur tắt con trỏ); đóng bảng gợi ý lệnh vì nó chỉ sống khi ô nhập giữ tiêu điểm.
+func (m *Model) focusViewPane(pane focusPane) {
+	m.focusInput = false
+	m.focusPane = pane
+	m.textarea.Blur()
+	m.clearCommandPalette()
+}
+
+// toggleFullscreen bật/tắt toàn màn hình cho view đang giữ tiêu điểm (focusPane).
+// Vào: đặt viewport của view theo toàn bộ phần thân rồi render lại nội dung theo chiều rộng mới.
+// Ra: khôi phục kích thước chia cột rồi render lại nội dung theo chiều rộng cột.
+func (m *Model) toggleFullscreen() {
+	m.fullscreen = !m.fullscreen
+	if m.fullscreen {
+		m.fitFullscreenViewport()
+	} else {
+		m.updateViewportSize()
+	}
+	m.refreshFocusedPane()
+}
+
+// fitFullscreenViewport đặt kích thước viewport của view đang phóng to theo toàn bộ phần thân.
+// Trừ theo hợp đồng từng panel renderer: events/stream trừ dòng header (-1), state trừ padding dọc (-2),
+// detail không trừ (không padding dọc).
+func (m *Model) fitFullscreenViewport() {
+	bodyH := m.bodyHeight()
+	switch m.focusPane {
+	case focusStream:
+		m.streamVP.Width = max(1, m.width-2)
+		m.streamVP.Height = max(1, bodyH-1)
+	case focusDetail:
+		m.detailVP.Width = max(1, m.width-2)
+		m.detailVP.Height = max(1, bodyH)
+	case focusState:
+		m.stateVP.Width = max(1, m.width-2)
+		m.stateVP.Height = max(1, bodyH-2)
+	default:
+		m.viewport.Width = max(1, m.width-2)
+		m.viewport.Height = max(1, bodyH-1)
+	}
+}
+
+// refreshFocusedPane render lại nội dung view đang giữ tiêu điểm theo chiều rộng viewport hiện tại.
+func (m *Model) refreshFocusedPane() {
+	switch m.focusPane {
+	case focusStream:
+		m.refreshStreamViewport()
+	case focusDetail:
+		m.refreshDetailViewport()
+	case focusState:
+		m.refreshStateViewport()
+	default:
+		m.refreshEventViewport()
+	}
 }
 
 // rebuildEventLines render toàn bộ luồng sự kiện vào cache (chiều rộng thay đổi hoặc cache chưa tồn tại).
@@ -269,7 +350,9 @@ func (m *Model) flushStreamIfDirty() bool {
 // dòng đang chạy (khung spinner thay đổi) và nối tiếp sự kiện mới đến sau lần xây cache trước,
 // thay vì render lại toàn bộ tối đa 500 dòng. Chiều rộng thay đổi → xây lại toàn bộ.
 func (m *Model) refreshEventViewport() {
-	centerW := m.eventFlowWidth()
+	// Chiều rộng render lấy từ viewport thực tế (chia cột: viewport.Width+2 == eventFlowWidth();
+	// toàn màn hình: == m.width), để cache tự xây lại đúng bề rộng khi phóng to/thu nhỏ.
+	centerW := max(4, m.viewport.Width+2)
 	if m.eventRenderWidth != centerW {
 		// Resize cửa sổ: mọi dòng cache render theo chiều rộng cũ đều sai, xây lại toàn bộ
 		m.rebuildEventLines(centerW)
@@ -309,21 +392,21 @@ func (m *Model) refreshStreamViewport() {
 }
 
 func (m *Model) refreshDetailViewport() {
-	rightW := m.detailWidth()
-	if rightW <= 4 {
+	if m.detailVP.Width <= 2 {
 		return
 	}
-	m.detailVP.SetContent(renderDetailContent(m.snapshot, rightW-4))
+	// Chiều rộng content theo viewport thực tế: chia cột == detailWidth()-4, toàn màn hình == m.width-4.
+	m.detailVP.SetContent(renderDetailContent(m.snapshot, m.detailVP.Width-2))
 }
 
 // refreshStateViewport đẩy nội dung thanh trạng thái bên trái vào viewport.
 // Nội dung thanh trạng thái được suy ra hoàn toàn từ snapshot, nên cần làm mới khi snapshot hoặc kích thước thay đổi.
 func (m *Model) refreshStateViewport() {
-	leftW := m.sidebarWidth()
-	if leftW <= 4 {
+	if m.stateVP.Width <= 2 {
 		return
 	}
-	m.stateVP.SetContent(renderStateContent(m.snapshot, leftW-4))
+	// Chiều rộng content theo viewport thực tế: chia cột == sidebarWidth()-4, toàn màn hình == m.width-4.
+	m.stateVP.SetContent(renderStateContent(m.snapshot, m.stateVP.Width-2))
 }
 
 // updateViewportSize cập nhật kích thước viewport theo kích thước cửa sổ hiện tại.
@@ -518,13 +601,19 @@ func (m *Model) inputHints() string {
 		}
 		return dimStyle.Render("Tab chuyển chế độ khởi động · Nhập / tìm lệnh · Enter bắt đầu hội thoại đồng sáng tác · Esc xóa input" + suffix)
 	}
+	if m.fullscreen {
+		return dimStyle.Render("Toàn màn hình: " + focusPaneLabel(m.focusPane) + " · Tab đổi view · f/Esc thoát" + suffix)
+	}
+	if !m.focusInput {
+		return dimStyle.Render("Focus: " + focusPaneLabel(m.focusPane) + " · Tab/Esc về ô nhập · ↑↓/PgUp/PgDn cuộn · Home/End đầu/cuối" + suffix)
+	}
 	switch m.snapshot.RuntimeState {
 	case "pausing":
 		return dimStyle.Render("Đang tạm dừng sáng tác · Vui lòng chờ vòng hiện tại kết thúc" + suffix)
 	case "paused":
 		return dimStyle.Render("Nhập / tìm lệnh · Enter tiếp tục sáng tác · Esc xóa input" + suffix)
 	}
-	return dimStyle.Render("Nhập / tìm lệnh · Nhấp/Tab chuyển panel · ↑↓ cuộn · End nhảy xuống · Ctrl+L xóa màn hình · Esc tạm dừng · Enter gửi" + suffix)
+	return dimStyle.Render("Nhập / tìm lệnh · Tab chuyển focus ô nhập ↔ panel · ↑↓ cuộn · End nhảy cuối · Ctrl+L xóa màn hình · Esc tạm dừng · Enter gửi" + suffix)
 }
 
 func (m *Model) eventFlowWidth() int {
@@ -600,6 +689,7 @@ func (m *Model) renderBottomBar() string {
 		m.snapshot,
 		m.outputDir(),
 		m.width,
+		m.focusInput,
 	)
 	if m.mode != modeNew || m.cocreate != nil {
 		return inputBox
@@ -661,6 +751,29 @@ func (m Model) View() string {
 			errMsg = m.err.Error()
 		}
 		body = renderWelcome(m.width, bodyH, errMsg, m.startupMode)
+	} else if m.fullscreen {
+		// Toàn màn hình: view đang giữ tiêu điểm chiếm toàn bộ phần thân (chiều rộng full, chiều cao bodyH).
+		// Kích thước viewport đặt lại mỗi lần render để khớp sau mỗi resize.
+		fullW := m.width
+		fullH := bodyH
+		switch m.focusPane {
+		case focusStream:
+			m.streamVP.Width = max(1, fullW-2)
+			m.streamVP.Height = max(1, fullH-1)
+			body = renderStreamPanel(m.streamVP, fullW, fullH, true, m.snapshot.IsRunning, m.spinnerIdx)
+		case focusDetail:
+			m.detailVP.Width = max(1, fullW-2)
+			m.detailVP.Height = max(1, fullH)
+			body = renderDetailPanel(m.detailVP, fullW, fullH, true)
+		case focusState:
+			m.stateVP.Width = max(1, fullW-2)
+			m.stateVP.Height = max(1, fullH-2)
+			body = renderStatePanel(m.stateVP, fullW, fullH, true)
+		default:
+			m.viewport.Width = max(1, fullW-2)
+			m.viewport.Height = max(1, fullH-1)
+			body = renderEventFlowViewport(m.viewport, fullW, fullH, true)
+		}
 	} else {
 		leftW := m.sidebarWidth()
 		rightW := m.detailWidth()
@@ -897,7 +1010,7 @@ func (m Model) handleAskUserKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if state.finishCurrentAnswer() {
 				state.submit()
 				m.askState = nil
-				return m, m.textarea.Focus()
+				return m, m.focusInputArea()
 			}
 			return m, nil
 		case tea.KeyBackspace, tea.KeyCtrlH:
@@ -924,7 +1037,7 @@ func (m Model) handleAskUserKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			},
 		}
 		m.askState = nil
-		return m, m.textarea.Focus()
+		return m, m.focusInputArea()
 	case tea.KeyUp:
 		state.moveCursor(-1)
 	case tea.KeyDown:
@@ -952,7 +1065,7 @@ func (m Model) handleAskUserKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if state.finishCurrentAnswer() {
 			state.submit()
 			m.askState = nil
-			return m, m.textarea.Focus()
+			return m, m.focusInputArea()
 		}
 	}
 	return m, nil
