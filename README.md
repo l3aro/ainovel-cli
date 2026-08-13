@@ -316,6 +316,7 @@ Gõ `/` vào ô nhập liệu để xem danh sách lệnh, hoặc dùng trực t
 | `/export` | Xuất truyện ra TXT. Xem [Xuất truyện](#xuất-truyện) |
 | `/export ~/ten-truyen.epub` | Xuất ra EPUB (đọc được trên máy đọc sách) |
 | `/import <đường-dẫn>` | Nhập tiểu thuyết có sẵn để tiếp tục viết |
+| `/novels` | Quay về thư viện để chuyển tiểu thuyết (chỉ khi rảnh) |
 | `/simulate` | Tạo hồ sơ phong cách viết từ văn mẫu trong thư mục `simulate/` |
 | `/cocreate` | Tạm dừng sáng tác, đồng sáng tác lên kế hoạch giai đoạn tiếp theo |
 
@@ -403,22 +404,20 @@ fatigue_words:
 
 ## Khôi phục sau gián đoạn
 
-Crash, mất mạng, tắt máy — **không mất tiến độ**. Chỉ cần chạy lại app trong cùng thư mục, hệ thống tự khôi phục từ điểm cuối cùng đã lưu.
+Crash, mất mạng, tắt máy — **không mất tiến độ**. Chỉ cần chạy lại app, chọn đúng tiểu thuyết trong thư viện, hệ thống tự khôi phục từ điểm cuối cùng đã lưu.
 
-> Muốn bắt đầu tiểu thuyết mới: xóa thư mục `workspace/output/` (hoặc di chuyển sang thư mục khác).
+**Thư viện tiểu thuyết**: Khi khởi động, app mở màn hình **Thư viện tiểu thuyết** — chọn truyện có sẵn (`↑/k` `↓/j` + `Enter`) hoặc nhấn `n` để tạo truyện mới. Mỗi tiểu thuyết nằm trong thư mục riêng `workspace/output/novels/<slug>/` nên không cần xóa hay di chuyển thư mục, cũng không cần volume Docker riêng để chuyển truyện. Truyện cũ trong `workspace/output/novel/` vẫn được liệt kê với nhãn **Di sản**.
 
-**Quản lý nhiều tiểu thuyết**: Mỗi tiểu thuyết gắn với một thư mục workspace riêng. Dùng volume Docker khác nhau cho từng cuốn:
-```bash
--v "$PWD/workspace-truyen-1:/workspace"   # Tiểu thuyết 1
--v "$PWD/workspace-truyen-2:/workspace"   # Tiểu thuyết 2
-```
+Trong khi đang sáng tác, gõ `/novels` để quay về thư viện chuyển tiểu thuyết — lệnh chỉ hoạt động khi ở trạng thái rảnh; nếu đang viết, lệnh bị từ chối và **không làm gián đoạn** công việc đang chạy.
 
 ---
 
 ## Cấu trúc thư mục output
 
+Mỗi tiểu thuyết là một thư mục riêng `workspace/output/novels/<slug>/` (slug lấy từ tên truyện):
+
 ```
-workspace/output/novel/
+workspace/output/novels/<slug>/
 ├── chapters/              # Bản thảo cuối (Markdown)
 │   ├── 01.md
 │   └── ...
@@ -437,13 +436,15 @@ workspace/output/novel/
     └── diag-export.md     # Báo cáo chẩn đoán ẩn danh (dùng khi báo lỗi)
 ```
 
+> Truyện cũ (bố cục trước đây) nằm tại `workspace/output/novel/` và được liệt kê trong thư viện với nhãn **Di sản**.
+
 ---
 
 ## Xuất truyện
 
 ```bash
 # Trong TUI, gõ:
-/export                          # TXT, lưu vào workspace/output/novel/TenTruyen.txt
+/export                          # TXT, lưu vào workspace/output/novels/<slug>/TenTruyen.txt
 /export ~/truyen-cua-toi.epub    # EPUB (đọc trên Kindle, Apple Books, v.v.)
 /export from=10 to=50            # Xuất chương 10–50
 /export from=10 --overwrite      # Ghi đè file cũ
@@ -461,14 +462,22 @@ workspace/output/novel/
 
 **Nguyên nhân**: Còn session cũ bị hỏng trong workspace.
 
-**Giải pháp**: Xóa workspace cũ và khởi động lại:
+**Giải pháp**: Session hỏng gắn với một tiểu thuyết cụ thể — xác định đúng tiểu thuyết bị lỗi và chỉ xóa thư mục gốc của riêng nó, rồi khởi động lại và chọn lại trong thư viện:
 ```bash
-# Linux/macOS
-rm -rf workspace/output/
+# Linux/macOS — tiểu thuyết mới (bố cục hiện tại)
+rm -rf workspace/output/novels/<slug>/
 
-# Windows PowerShell
-Remove-Item -Recurse -Force workspace\output\
+# Linux/macOS — tiểu thuyết cũ (bố cục trước đây, chỉ khi cố ý đặt lại truyện này)
+rm -rf workspace/output/novel/
+
+# Windows PowerShell — tiểu thuyết mới (bố cục hiện tại)
+Remove-Item -Recurse -Force workspace\output\novels\<slug>\
+
+# Windows PowerShell — tiểu thuyết cũ (bố cục trước đây)
+Remove-Item -Recurse -Force workspace\output\novel\
 ```
+
+> **Cảnh báo**: Không xóa toàn bộ `workspace/output/` — thư mục này chứa **mọi** tiểu thuyết trong thư viện. Chỉ xóa thư mục gốc của tiểu thuyết bị lỗi.
 
 ---
 
@@ -476,7 +485,7 @@ Remove-Item -Recurse -Force workspace\output\
 
 **Nguyên nhân phổ biến**:
 1. Model quá nhỏ (< 7B) — không đủ năng lực theo protocol phức tạp
-2. Session cũ bị hỏng — xóa workspace như trên
+2. Session cũ bị hỏng — xóa thư mục gốc của tiểu thuyết bị lỗi như trên
 
 **Giải pháp**: Dùng model lớn hơn. Khuyến nghị tối thiểu:
 - **Ollama local**: `gemma4:12b` hoặc `qwen3.5:27b`
