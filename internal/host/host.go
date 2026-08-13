@@ -203,10 +203,22 @@ func (h *Host) StartPrepared(promptText string) error {
 	if err := h.budget.Refuse(); err != nil {
 		return err
 	}
+	// Kho tiểu thuyết: tải progress cũ TRƯỚC mọi thao tác reset/ghi — tên sách
+	// được giữ nguyên qua Progress.Init, còn progress hỏng (lỗi đọc không phải
+	// "không tồn tại") dừng toàn bộ chuỗi khởi tạo trước khi bất kỳ store nào
+	// bị xóa hoặc ghi đè.
+	oldProgress, err := h.store.Progress.Load()
+	if err != nil {
+		return fmt.Errorf("load progress: %w", err)
+	}
+	novelName := ""
+	if oldProgress != nil {
+		novelName = oldProgress.NovelName
+	}
 	if err := h.store.Checkpoints.Reset(); err != nil {
 		return fmt.Errorf("reset checkpoints: %w", err)
 	}
-	if err := h.store.Progress.Init("", 0); err != nil {
+	if err := h.store.Progress.Init(novelName, 0); err != nil {
 		return fmt.Errorf("init progress: %w", err)
 	}
 
