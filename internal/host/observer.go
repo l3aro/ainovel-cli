@@ -10,7 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/voocel/agentcore"
 	"github.com/voocel/ainovel-cli/internal/domain"
@@ -51,24 +50,6 @@ type activeCall struct {
 	depth   int
 }
 
-// thinkingWindowBytes là giới hạn byte của cửa sổ so sánh tiền tố thinking
-// (xem thinkingState). Đủ lớn để nhận diện chính xác mọi khối thinking thực tế,
-// nhưng chặn chi phí O(n) mỗi token khi thinking rất dài.
-const thinkingWindowBytes = 4096
-
-// thinkingState theo dõi trạng thái trích xuất delta thinking của một agent.
-// Không giữ toàn bộ văn bản tích lũy (tránh O(n²) và rò rỉ bộ nhớ):
-//   - emitted: độ dài văn bản thinking đã phát ra. Luôn là len(thinking) của lần
-//     cập nhật trước nên là biên UTF-8 hợp lệ — delta = thinking[emitted:]
-//     không bao giờ cắt giữa rune.
-//   - window: tiền tố thinking bị cắt tại thinkingWindowBytes (lùi về biên rune
-//     hợp lệ nên luôn là chuỗi UTF-8 hoàn chỉnh). Chỉ dùng để so sánh tiền tố
-//     byte-wise trong trường hợp nối tiếp, không bao giờ phát ra.
-type thinkingState struct {
-	emitted int
-	window  string
-}
-
 // observer đăng ký luồng sự kiện của coordinator và chiếu sang kênh output của Host.
 // Đây là observer thuần túy, không tham gia bất kỳ quyết định điều khiển nào.
 type observer struct {
@@ -86,7 +67,7 @@ type observer struct {
 	aborting atomic.Bool
 
 	streamThinking        bool
-	thinkingByAgent       map[string]thinkingState   // agent → trạng thái trích xuất delta thinking (cửa sổ có giới hạn, không giữ toàn bộ văn bản)
+	lastThinkingByAgent   map[string]string          // agent → văn bản thinking tích lũy gần nhất (dùng để trích xuất delta tăng dần)
 	dispatchStarts        map[string]*activeCall     // agent được dispatch → lần gọi DISPATCH đang diễn ra
 	currentDispatchTarget string                     // tên subagent đang thực thi (Args có thể rỗng khi handleToolEnd)
 	toolStarts            map[string]*activeCall     // agent → lần gọi TOOL đang diễn ra
@@ -115,15 +96,15 @@ type agentState struct {
 
 func newObserver(coordinator *agentcore.Agent, s *storepkg.Store, emitEv func(Event), emitD func(string), emitC func()) *observer {
 	o := &observer{
-		emitEv:           emitEv,
-		emitD:            emitD,
-		emitC:            emitC,
-		store:            s,
-		agents:           make(map[string]*agentState),
-		thinkingByAgent:  make(map[string]thinkingState),
-		dispatchStarts:   make(map[string]*activeCall),
-		toolStarts:       make(map[string]*activeCall),
-		streamExtractors: make(map[string]*agentExtractor),
+		emitEv:              emitEv,
+		emitD:               emitD,
+		emitC:               emitC,
+		store:               s,
+		agents:              make(map[string]*agentState),
+		lastThinkingByAgent: make(map[string]string),
+		dispatchStarts:      make(map[string]*activeCall),
+		toolStarts:          make(map[string]*activeCall),
+		streamExtractors:    make(map[string]*agentExtractor),
 	}
 	o.unsub = coordinator.Subscribe(o.handle)
 	return o
@@ -193,12 +174,6 @@ func (o *observer) handle(ev agentcore.Event) {
 		o.handleMessageUpdate(ev)
 	case agentcore.EventMessageEnd:
 		o.streamClear()
-		// Trạng thái thinking KHÔNG được lọt qua ranh giới message: hai message
-		// liên tiếp cùng bắt đầu bằng một tiền tố sẽ khiến phần đầu của message
-		// sau bị bỏ sót (nhầm là delta nối tiếp). Xóa toàn bộ map tại đây.
-		// (EventTurnStart không cần: nó chỉ cập nhật bộ đếm lượt, một lượt có thể
-		// chứa nhiều message và khối thinking thuộc về message chứ không phải lượt.)
-		clear(o.thinkingByAgent)
 	case agentcore.EventTurnStart:
 		if ev.Progress != nil && ev.Progress.Kind == agentcore.ProgressTurnCounter {
 			o.updateAgent(ev.Progress.Agent, func(a *agentState) {
@@ -458,9 +433,9 @@ func (o *observer) handleToolUpdate(ev agentcore.Event) {
 }
 
 // handleSubagentDelta phân luồng văn bản và tham số tool-call của subagent:
-//   - DeltaText trực tiếp stream ra dưới dạng markdown
-//   - DeltaToolCall chỉ trích xuất trường nội dung dài của các công cụ đã biết (như draft_chapter.content);
-//     tham số JSON của các công cụ khác đều bị bỏ qua
+// - DeltaText trực tiếp stream ra dưới dạng markdown
+// - DeltaToolCall chỉ trích xuất trường nội dung dài của các công cụ đã biết (như draft_chapter.content);
+//   tham số JSON của các công cụ khác đều bị bỏ qua
 func (o *observer) handleSubagentDelta(p *agentcore.ProgressPayload) {
 	if p.DeltaKind != agentcore.DeltaToolCall {
 		o.emitStreamDelta(p.Delta, false)
@@ -513,15 +488,6 @@ func (o *observer) handleSubagentDelta(p *agentcore.ProgressPayload) {
 	}
 }
 
-// handleThinkingProgress trích xuất delta tăng dần từ văn bản thinking tích lũy
-// (Progress.Thinking là bản tích lũy đầy đủ mỗi token, không phải delta).
-//
-// Quyết định append/rewrite:
-//   - Nối tiếp: thinking mới bắt đầu bằng toàn bộ văn bản cũ → delta = thinking[st.emitted:].
-//     Kiểm tra qua cửa sổ có giới hạn (byte-wise nhất quán vì window luôn được cắt
-//     cùng một cách): len(thinking) >= st.emitted bảo vệ không cắt quá độ dài thực,
-//     len(window) >= len(st.window) + HasPrefix(window, st.window) xác nhận tiền tố.
-//   - Khối mới/viết lại: không khớp → phát lại toàn bộ thinking (delta = thinking).
 func (o *observer) handleThinkingProgress(ev agentcore.Event) {
 	agent := ev.Progress.Agent
 	thinking := ev.Progress.Thinking
@@ -529,28 +495,12 @@ func (o *observer) handleThinkingProgress(ev agentcore.Event) {
 		return
 	}
 
-	window := thinking
-	if len(window) > thinkingWindowBytes {
-		// Cắt cứng tại thinkingWindowBytes rồi lùi về biên rune hợp lệ cuối cùng
-		// tại hoặc trước cutoff (bỏ toàn bộ rune dang dở, tối đa 3 byte).
-		// Việc cắt chỉ ảnh hưởng so sánh cửa sổ, không ảnh hưởng delta phát ra:
-		// delta = thinking[st.emitted:] với st.emitted luôn là độ dài đầy đủ của
-		// lần cập nhật trước, tức là biên UTF-8 hợp lệ.
-		window = window[:thinkingWindowBytes]
-		for len(window) > 0 && !utf8.ValidString(window) {
-			_, size := utf8.DecodeLastRuneInString(window)
-			window = window[:len(window)-size]
-		}
-	}
-
-	st := o.thinkingByAgent[agent]
+	prev := o.lastThinkingByAgent[agent]
 	delta := thinking
-	if len(thinking) >= st.emitted && len(window) >= len(st.window) &&
-		strings.HasPrefix(window, st.window) {
-		delta = thinking[st.emitted:]
+	if strings.HasPrefix(thinking, prev) {
+		delta = thinking[len(prev):]
 	}
-	// Cập nhật trạng thái SAU KHI tính delta: emitted luôn là len(thinking) hiện tại.
-	o.thinkingByAgent[agent] = thinkingState{emitted: len(thinking), window: window}
+	o.lastThinkingByAgent[agent] = thinking
 	if delta == "" {
 		return
 	}
@@ -622,7 +572,7 @@ func (o *observer) handleToolEnd(ev agentcore.Event) {
 		a.tool = ""
 		a.state = "idle"
 	})
-	delete(o.thinkingByAgent, agent)
+	delete(o.lastThinkingByAgent, agent)
 
 	// Lấy bản ghi DISPATCH đang diễn ra (ev.Args của handleToolEnd có thể rỗng, lấy từ currentDispatchTarget)
 	var dispatchCall *activeCall
